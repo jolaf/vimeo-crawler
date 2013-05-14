@@ -1,12 +1,14 @@
 #!/usr/bin/python
+from datetime import datetime
 from getopt import getopt
 from itertools import count
-from logging import getLogger, Formatter, FileHandler, StreamHandler, INFO, NOTSET, WARNING
+from logging import getLogger, Formatter, FileHandler, StreamHandler, DEBUG, INFO, WARNING
 from re import match
-from os import chmod, makedirs, stat
+from os import chmod, makedirs, remove, stat
 from os.path import abspath, isdir, isfile, join, lexists
 from subprocess import Popen
 from sys import argv, exit, platform, stdout # pylint: disable=W0622
+from traceback import format_exc
 
 try: # Selenium configuration
     import selenium
@@ -14,7 +16,7 @@ try: # Selenium configuration
         raise ImportError('Selenium version %s < 2.32.0' % selenium.__version__)
     from selenium import webdriver
     from selenium.common.exceptions import NoSuchElementException
-    DRIVERS = dict((v.lower(), (v, getattr(webdriver, v))) for v in vars(webdriver) if v[0].isupper()) # ToDo: Make this list better
+    DRIVERS = dict((v.lower(), (v, getattr(webdriver, v))) for v in vars(webdriver) if v[0].isupper()) # ToDo: Make this list more precise
 except ImportError, ex:
     print "%s: %s\nERROR: This software requires Selenium.\nPlease install Selenium v2.32.0 or later: https://pypi.python.org/pypi/selenium\n" % (ex.__class__.__name__, ex)
     exit(-1)
@@ -22,12 +24,13 @@ except ImportError, ex:
 try: # Filesystem symbolic links configuration
     from os import symlink # UNIX # pylint: disable=E0611
 except ImportError:
+    global symlink # pylint: disable=W0604
     try:
         import ctypes
-        KERNEL_DLL = ctypes.windll.LoadLibrary('kernel32.dll')
-        global symlink # pylint: disable=W0604
-        def symlink(source, link_name):
-            KERNEL_DLL.CreateSymbolicLinkW(link_name, source, 0)
+        dll = ctypes.windll.LoadLibrary('kernel32.dll')
+        def symlink(source, linkName):
+            if not dll.CreateSymbolicLinkW(linkName, source, 0):
+                raise OSError("code %d" % dll.GetLastError())
     except Exception, ex:
         symlink = None
         print "%s: %s\nWARNING: Filesystem links will not be available.\nPlease run on UNIX or Windows Vista or later.\n" % (ex.__class__.__name__, ex)
@@ -40,15 +43,31 @@ except ImportError, ex:
     requests = None
     print "%s: %s\nWARNING: Video size information will not be available.\nPlease install Requests v1.2.0 or later: https://pypi.python.org/pypi/requests\n" % (ex.__class__.__name__, ex)
 
-isWindows = platform.lower().startswith('win')
-DOWNLOAD_SCRIPT = 'download.cmd' if isWindows else 'download.sh'
-DOWNLOAD_HEADER = '@echo off\n' if isWindows else '#/bin/sh\n'
-DOWNLOAD_COMMAND = 'wget --header "%c" -t %r --retry-connrefused -c -O "%t" "%s"'
+TIME_FORMAT = '%Y-%m-%d %H:%M:%S'
 
-TITLE = 'VimeoCrawler v1.0 (c) 2013 Vasily Zakharov vmzakhar@gmail.com'
+isWindows = platform.lower().startswith('win')
+EMPTY_ECHO = '.' if isWindows else ''
+DOWNLOAD_SCRIPT = 'download.cmd' if isWindows else 'download.sh'
+DOWNLOAD_HEADER = ('@echo off\n' if isWindows else '#/bin/sh\n') + '''\
+echo%s
+echo VimeoCrawler download script
+echo Generated at %%s
+echo%s
+''' % (EMPTY_ECHO, EMPTY_ECHO)
+DOWNLOAD_COMMAND = 'wget --header "%c" -t %r --retry-connrefused -c -O "%t" "%s"'
+SCRIPT_COMMAND = '''\
+echo %%s
+echo %%s
+echo%s
+%%s
+echo %%s
+echo%s
+''' % (EMPTY_ECHO, EMPTY_ECHO)
+
+TITLE = 'VimeoCrawler v1.1 (c) 2013 Vasily Zakharov vmzakhar@gmail.com'
 
 OPTION_NAMES = ('download', 'login', 'max-items', 'retries', 'target', 'webdriver')
-FIELD_NAMES = ('downloadCommand', 'credentials', 'maxItems', 'retryCount', 'targetDirectory', 'driverName')
+FIELD_NAMES = ('downloadCommandTemplate', 'credentials', 'maxItems', 'retryCount', 'targetDirectory', 'driverName')
 SHORT_OPTIONS = ''.join(('%c:' % option[0]) for option in OPTION_NAMES) + 'fghsv'
 LONG_OPTIONS = tuple(('%s=' % option) for option in OPTION_NAMES) + ('no-folders', 'go', 'help', 'no-sizes', 'verbose')
 
@@ -108,7 +127,7 @@ def usage(error = None):
 LOG_FILE_NAME = 'VimeoCrawler.log'
 
 VIMEO = 'vimeo.com'
-VIDEO_URL = 'https://%s/%%s' % VIMEO
+VIMEO_URL = 'https://%s/%%s' % VIMEO
 COOKIE = 'vimeo'
 
 SYSTEM_LINKS = ('about', 'blog', 'categories', 'channels', 'cookie_policy', 'couchmode', 'creativecommons', 'creatorservices', 'dmca', 'enhancer', 'everywhere', 'explore', 'groups', 'help', 'jobs', 'join', 'log_in', 'love', 'musicstore', 'ondemand', 'plus', 'privacy', 'pro', 'robots.txt', 'search', 'site_map', 'staffpicks', 'terms', 'upload', 'videoschool') # http://vimeo.com/link
@@ -130,23 +149,37 @@ def readableSize(size):
         fSize = '%.0f' % size
     return '%s %s' % (fSize, unit) # pylint: disable=W0631
 
-INVALID_CHARS = ':/\\\'"?*' # for file names, to be replaced with _
+INVALID_FILENAME_CHARS = ':/\\\'"?*' # for file names, to be replaced with _
 def cleanupFileName(fileName):
-    return ''.join('_' if c in INVALID_CHARS else c for c in fileName.strip().rstrip('.'))
+    return ''.join('_' if c in INVALID_FILENAME_CHARS else c for c in fileName)
+
+WINDOWS_INVALID_SHELL_CHARS = '<>'
+UNIX_INVALID_SHELL_CHARS = '\\"`$'
+def cleanupForShell(s):
+    if isWindows:
+        for c in WINDOWS_INVALID_SHELL_CHARS:
+            s = s.replace(c, '^' + c)
+        return s
+    for c in UNIX_INVALID_SHELL_CHARS:
+        s = s.replace(c, '\\' + c)
+    return '"%s"' % s
 
 class URL(object):
     FILE_NAME = 'source.url'
     def __init__(self, url):
         if hasattr(url, 'url'):
             url = url.url
-        if url.isdigit():
-            url = VIDEO_URL % url
+        if '/' not in str(url):
+            url = VIMEO_URL % url
         self.url = str(url).strip().strip('/')
+        slashIndex = self.url.find('/') + 1
+        self.url = self.url[:slashIndex] + self.url[slashIndex:].replace('//', '/')
         url = self.url.lower()
-        assert VIMEO in url, url
+        if VIMEO not in url:
+            raise ValueError("Invalid Vimeo URL: %s" % url)
         tokens = url[url.index(VIMEO) + len(VIMEO) + 1:].split('/')
         if len(tokens) in (3, 4) and tokens[-1].isdigit():
-            self.url = VIDEO_URL % tokens[-1]
+            self.url = VIMEO_URL % tokens[-1]
             tokens = tokens[-1:]
         if len(tokens) == 3 and tokens[-1] == 'videos':
             tokens = tokens[:-1]
@@ -172,7 +205,7 @@ class URL(object):
         return self.url
 
     def __repr__(self):
-        return "URL('%s')" % self.url
+        return "URL(%s)" % repr(self.url)
 
     def __hash__(self):
         return hash(self.url)
@@ -186,7 +219,6 @@ class VimeoDownloader(object): # pylint: disable=R0902
         self.go = False
         self.verbose = False
         self.foldersNeeded = True
-        self.doCreateFolders = False
         self.getFileSizes = bool(requests)
         # Options with arguments
         self.driver = None
@@ -194,18 +226,11 @@ class VimeoDownloader(object): # pylint: disable=R0902
         self.driverClass = None
         self.credentials = None
         self.maxItems = None
-        self.retryCount = '5'
-        self.targetDirectory = '.'
-        self.downloadCommand = DOWNLOAD_COMMAND
-        self.startURL = None
-        # Initial values
-        self.loggedIn = False
-        self.vIDs = []
-        self.folders = []
-        self.videos = {}
-        self.totalFileSize = 0
-        self.errors = 0
+        self.retryCount = 5
+        self.targetDirectory = ''
         self.downloadScriptFileName = None
+        self.downloadCommandTemplate = DOWNLOAD_COMMAND
+        self.startURL = None
         try:
             # Reading command line options
             (options, parameters) = getopt(args, SHORT_OPTIONS, LONG_OPTIONS)
@@ -244,45 +269,61 @@ class VimeoDownloader(object): # pylint: disable=R0902
                 except ValueError:
                     raise ValueError("-l / --login parameter must be formatted as follows: user.name@host.name:password")
             if self.maxItems:
-                if self.maxItems.isdigit(): # pylint: disable=E1101
+                try:
                     self.maxItems = int(self.maxItems)
-                else:
-                    raise ValueError("-m / --max-items parameter must be integer")
-            if self.retryCount.isdigit():
+                    if self.maxItems < 0:
+                        raise ValueError
+                except ValueError:
+                    raise ValueError("-m / --max-items parameter must be a non-negative integer")
+            try:
                 self.retryCount = int(self.retryCount)
-            else:
-                raise ValueError("-r / --retries parameter must be integer")
+                if self.retryCount < 0:
+                    raise ValueError
+            except ValueError:
+                raise ValueError("-r / --retries parameter must be non-negative integer")
             if len(parameters) > 1:
                 raise Exception("Too many parameters")
             if parameters:
                 self.startURL = URL(parameters[0])
             elif not self.credentials:
                 raise ValueError("Neither login credentials nor start URL is specified")
-            if not isdir(self.targetDirectory):
-                makedirs(self.targetDirectory)
-            # Logging configuration
-            formatter = Formatter("%(asctime)s %(levelname)s %(message)s", '%Y-%m-%d %H:%M:%S')
-            streamHandler = StreamHandler()
-            streamHandler.setFormatter(formatter)
-            fileHandler = FileHandler(join(self.targetDirectory, LOG_FILE_NAME), mode = 'w')
-            fileHandler.setFormatter(formatter)
+            # Creating target directory
+            if self.targetDirectory == '.':
+                self.targetDirectory = ''
+            self.createDir()
+            if self.startURL:
+                self.startURL.createFile(self.targetDirectory)
+            self.downloadScriptFileName = join(self.targetDirectory, DOWNLOAD_SCRIPT)
+            # Configuring logging
             rootLogger = getLogger()
-            rootLogger.addHandler(streamHandler)
-            rootLogger.addHandler(fileHandler)
-            rootLogger.setLevel(WARNING)
+            if not rootLogger.handlers:
+                formatter = Formatter("%(asctime)s %(levelname)s %(message)s", '%Y-%m-%d %H:%M:%S')
+                streamHandler = StreamHandler()
+                streamHandler.setFormatter(formatter)
+                fileHandler = FileHandler(join(self.targetDirectory, LOG_FILE_NAME), mode = 'w')
+                fileHandler.setFormatter(formatter)
+                rootLogger.addHandler(streamHandler)
+                rootLogger.addHandler(fileHandler)
+            rootLogger.setLevel(DEBUG if self.verbose else WARNING)
             self.logger = getLogger('vimeo')
-            self.logger.setLevel(NOTSET if self.verbose else INFO)
+            self.logger.setLevel(DEBUG if self.verbose else INFO)
             self.logger.info(TITLE)
         except Exception, e:
             usage("ERROR: %s\n" % e)
 
-    def getElement(self, css):
-        return self.driver.find_element_by_css_selector(css)
+    def createDir(self, dirName = None):
+        dirName = join(self.targetDirectory, dirName) if dirName else self.targetDirectory
+        if dirName and not isdir(dirName):
+            makedirs(dirName)
+        return dirName
 
     def goTo(self, url):
         url = URL(url)
         self.logger.info("Going to %s", url)
         self.driver.get(url.url)
+
+    def getElement(self, css):
+        return self.driver.find_element_by_css_selector(css)
 
     def login(self, email, password):
         self.goTo('http://vimeo.com/log_in')
@@ -291,7 +332,7 @@ class VimeoDownloader(object): # pylint: disable=R0902
             self.getElement('#email').send_keys(email)
             self.getElement('#password').send_keys(password)
             self.getElement('#login_form input[type=submit]').click()
-            self.getElement('#menu .me a') # Make sure login is successful
+            self.getElement('#menu .me a').click()
             self.loggedIn = True
         except NoSuchElementException, e:
             self.logger.error("Login failed: %s", e.msg)
@@ -331,19 +372,16 @@ class VimeoDownloader(object): # pylint: disable=R0902
         return items
 
     def getItemsFromURL(self, url = None, target = None):
-        if url:
-            url = URL(url)
-        else: # No start URL, assume we've just logged in, downloading the whole account
-            self.getElement('#menu .me a').click()
-            url = URL(self.driver.current_url)
+        url = URL(url or self.driver.current_url)
         if not self.startURL:
             self.startURL = url
+            self.startURL.createFile(self.targetDirectory)
         items = ()
         if url.isVideo: # Video
             if url.vID not in self.vIDs:
                 self.vIDs.append(url.vID)
-            if target:
-                target.append(url.vID)
+            if target != None:
+                target.add(url.vID)
         elif url.isAccount: # Account main page
             self.goTo(url.url + '/videos')
             self.logger.info("Processing account %s", url.account)
@@ -379,8 +417,11 @@ class VimeoDownloader(object): # pylint: disable=R0902
                 if title:
                     self.logger.info("Folder: %s", title.encode(stdout.encoding, 'replace'))
                     if self.doCreateFolders:
-                        target = [(cleanupFileName(title), url)]
-                        self.folders.append(target)
+                        dirName = self.createDir(cleanupFileName(title.strip().rstrip('.'))) # unicode
+                        url.createFile(dirName)
+                        if symlink:
+                            target = set()
+                            self.folders.append((dirName, target))
                     items = self.getItemsFromFolder()
                     break
         else: # Some other page
@@ -389,34 +430,37 @@ class VimeoDownloader(object): # pylint: disable=R0902
         for item in items:
             self.getItemsFromURL(item, target)
 
-    def processVideo(self, vID, percent = None):
-        def getPreferredLink(element):
-            for preference in FILE_PREFERENCES:
-                try:
-                    return element.find_element_by_partial_link_text(preference)
-                except NoSuchElementException:
-                    pass
-            return None
+    def processVideo(self, vID, number):
         title = ''
-        link = None
-        for i in xrange(self.retryCount + 1):
+        download = None
+        # Parse video page
+        for i in count():
             try:
-                self.goTo(VIDEO_URL % vID)
-                title = self.getElement('h1[itemprop=name]').text
+                self.goTo(vID)
+                title = self.getElement('h1[itemprop=name]').text.strip().rstrip('.').encode(stdout.encoding, 'replace')
                 self.driver.find_element_by_link_text('Download').click()
                 download = self.getElement('#download_videos')
-                link = getPreferredLink(download)
                 break
             except NoSuchElementException, e:
                 self.logger.warning(e.msg)
                 if i >= self.retryCount:
                     self.logger.error("Page load failed")
                     self.errors += 1
-        if link:
-            tokens = link.text.split()
-            extension = tokens[1].strip('.')
-            description = '%s/%s' % (tokens[0], extension.upper())
-            link = link.get_attribute('href')
+                    break
+        # Parse download links
+        link = None
+        if download:
+            for preference in FILE_PREFERENCES:
+                try:
+                    link = download.find_element_by_partial_link_text(preference)
+                    break
+                except NoSuchElementException:
+                    pass
+        if link: # Parse chosen download link
+            tokens = link.text.split() # unicode
+            extension = tokens[1].strip('.') # unicode
+            description = ('%s/%s' % (tokens[0], extension.upper())).encode(stdout.encoding, 'replace')
+            link = str(link.get_attribute('href'))
             if self.getFileSizes:
                 try:
                     request = requests.get(link, stream = True)
@@ -428,91 +472,87 @@ class VimeoDownloader(object): # pylint: disable=R0902
                     self.logger.warning(e)
         else:
             description = extension = 'NONE'
-        self.logger.info(' '.join((title, '(%s)' % description, '%d/%d' % (len(self.videos) + 1, len(self.vIDs)))
-                                + (('%d%%' % percent,) if percent != None else ())
-                                + ((readableSize(self.totalFileSize),) if self.totalFileSize else ())).encode(stdout.encoding, 'replace'))
-        fileName = cleanupFileName('%s.%s' % (' '.join((str(vID),) + ((title.encode(stdout.encoding, 'replace').decode(stdout.encoding),) if title else ())), extension.lower()))
-        self.videos[vID] = (fileName, link)
-
-    def processVideos(self):
-        if self.folders:
-            self.logger.info("Got total of %d folders", len(self.folders))
-        self.logger.info("Processing %d videos...", len(self.vIDs))
-        assert len(self.vIDs) == len(set(self.vIDs))
-        if self.getFileSizes:
-            requests.adapters.DEFAULT_RETRIES = self.retryCount
-        for (n, vID) in enumerate(self.vIDs, 1):
-            self.processVideo(vID, int(n * 100.0 / len(self.vIDs)))
-
-    def createDir(self, dirName = None, url = None):
-        dirName = join(self.targetDirectory, dirName) if dirName else self.targetDirectory
-        if not isdir(dirName):
-            makedirs(dirName)
-        if url:
-            url.createFile(dirName)
-        return dirName
-
-    def createFiles(self):
-        self.logger.info("Creating files...")
-        dirName = self.createDir(url = self.startURL)
-        cookie = self.driver.get_cookie(COOKIE)
-        downloadCommand = self.downloadCommand.replace('%c', 'Cookie: %s=%s' % (COOKIE, str(cookie['value'])) if cookie else '').replace('%r', str(self.retryCount)) + '\n'
-        downloadScriptBody = DOWNLOAD_HEADER
-        for vID in self.vIDs:
-            (fileName, link) = self.videos[vID]
-            downloadScriptBody += downloadCommand.replace('%s', link).replace('%t', fileName)
-            fileName = join(dirName, fileName)
-            if not isfile(fileName):
-                open(fileName, 'w').close() # Touch target file
-        self.downloadScriptFileName = join(dirName, DOWNLOAD_SCRIPT)
-        with open(self.downloadScriptFileName, 'w') as f:
-            f.write(downloadScriptBody.encode(stdout.encoding))
-            chmod(self.downloadScriptFileName, stat(self.downloadScriptFileName).st_mode | 0o111) # chmod a+x
-        self.logger.info("Download script saved to %s", self.downloadScriptFileName)
-
-    def createFolders(self):
-        if self.folders:
-            self.logger.info("Creating folders and links...")
-        for folder in self.folders:
-            dirName = self.createDir(*folder[0])
-            for vID in folder[1:]:
-                linkName = self.videos[vID][0]
-                fileName = join(dirName, linkName)
-                if not lexists(fileName):
-                    try:
-                        symlink(join('..', linkName), fileName)
-                    except Exception, e:
-                        self.logger.warning("Can't create link at %s: %s", fileName, e)
-                        self.errors += 1
+        # Prepare file information
+        prefix = ' '.join((title, '(%s)' % description))
+        suffix = ' '.join((('%d/%d %d%%' % (number, len(self.vIDs), int(number * 100.0 / len(self.vIDs)))),)
+                        + ((readableSize(self.totalFileSize),) if self.totalFileSize else ()))
+        self.logger.info(' '.join((prefix, suffix)))
+        fileName = cleanupFileName('%s.%s' % (' '.join((str(vID),) + ((title.decode(stdout.encoding),) if title else ())), extension.lower())) # unicode
+        # Creating target file, if it doesn't exist
+        targetFileName = join(self.targetDirectory, fileName)
+        if not isfile(targetFileName):
+            open(targetFileName, 'w').close()
+        if link: # Creating download script entry
+            prefix = cleanupForShell('Downloading ' + prefix)
+            suffix = cleanupForShell('Downloaded ' + suffix)
+            command = self.downloadCommand.replace('%s', link).replace('%t', fileName.encode(stdout.encoding))
+            self.downloadScript.write(SCRIPT_COMMAND % (prefix, cleanupForShell('> ' + command), command, suffix))
+        # Creating symbolic links, if enabled
+        for dirName in (dirName for (dirName, vIDs) in self.folders if vID in vIDs):
+            linkFileName = join(dirName, fileName) # unicode
+            try:
+                if lexists(linkFileName):
+                    remove(linkFileName)
+            except:
+                pass
+            try:
+                symlink(join('..', fileName), linkFileName)
+            except Exception, e:
+                self.logger.warning("Can't create link at %s: %s", linkFileName.encode(stdout.encoding), e)
+                self.errors += 1
 
     def run(self):
+        self.doCreateFolders = False
+        self.loggedIn = False
+        self.vIDs = []
+        self.folders = []
+        self.totalFileSize = 0
+        self.downloadCommand = None
+        self.downloadScript = None
+        self.errors = 0
         try:
             self.logger.info("Starting %s..." % self.driverName)
             self.driver = self.driverClass() # ToDo: Provide parameters to the driver
             if self.credentials:
                 self.login(*self.credentials)
             if not self.loggedIn and not self.startURL:
-                raise ValueError("Loging failed and no start URL is specified, aborting")
+                raise ValueError("Login failed and no start URL is specified, aborting")
             self.getItemsFromURL(self.startURL)
+            if self.folders:
+                self.logger.info("Got total of %d folders", len(self.folders))
             if self.vIDs:
-                self.processVideos()
-                self.createFiles()
-                self.createFolders()
+                assert len(self.vIDs) == len(set(self.vIDs))
+                self.logger.info("Processing %d videos...", len(self.vIDs))
+                cookie = self.driver.get_cookie(COOKIE)
+                self.downloadCommand = self.downloadCommandTemplate.replace('%c', 'Cookie: %s=%s' % (COOKIE, str(cookie['value'])) if cookie else '').replace('%r', str(self.retryCount))
+                self.downloadScript = open(self.downloadScriptFileName, 'w')
+                self.downloadScript.write(DOWNLOAD_HEADER % datetime.now().strftime(TIME_FORMAT))
+                if self.getFileSizes:
+                    requests.adapters.DEFAULT_RETRIES = self.retryCount
+                for (n, vID) in enumerate(self.vIDs, 1):
+                    self.processVideo(vID, n)
+                self.downloadScript.close()
+                chmod(self.downloadScriptFileName, stat(self.downloadScriptFileName).st_mode | 0o111) # chmod a+x
         except Exception, e:
-            self.logger.error(e)
+            self.logger.error(format_exc() if self.verbose else e)
             self.errors += 1
         finally:
             if self.driver:
                 self.driver.close()
-        self.logger.info("Crawling complete" + (' with %d errors' % self.errors if self.errors else ''))
-        if self.go and self.downloadScriptFileName:
+        self.logger.info("Crawling completed"
+                       + (' with %d errors' % self.errors if self.errors else '')
+                       + (", download script saved to %s" % self.downloadScriptFileName if self.downloadScript else ''))
+        if self.go and self.vIDs and not self.errors:
             try:
                 self.logger.info("Running download script...")
-                subprocess = Popen(abspath(self.downloadScriptFileName), cwd = self.targetDirectory, shell = True)
+                subprocess = Popen(abspath(self.downloadScriptFileName), cwd = self.targetDirectory or '.', shell = True)
                 subprocess.communicate()
-                self.logger.info("Done with code %d", subprocess.returncode)
+                self.logger.info("Done with code %d", subprocess.returncode) # pylint: disable=E1101
+                if subprocess.returncode: # pylint: disable=E1101
+                    raise Exception('code %d' % subprocess.returncode) # pylint: disable=E1101
             except Exception, e:
-                self.logger.error("FAILED: %s", e)
+                self.logger.error(format_exc() if self.verbose else e)
+                self.errors += 1
         return self.errors
 
 def main(args):
