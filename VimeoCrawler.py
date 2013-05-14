@@ -65,7 +65,7 @@ echo %%s
 echo%s
 ''' % (EMPTY_ECHO, EMPTY_ECHO)
 
-TITLE = 'VimeoCrawler v1.1 (c) 2013 Vasily Zakharov vmzakhar@gmail.com'
+TITLE = 'VimeoCrawler v1.11 (c) 2013 Vasily Zakharov vmzakhar@gmail.com'
 
 OPTION_NAMES = ('download', 'login', 'max-items', 'retries', 'target', 'webdriver')
 FIELD_NAMES = ('downloadCommandTemplate', 'credentials', 'maxItems', 'retryCount', 'targetDirectory', 'driverName')
