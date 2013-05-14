@@ -43,6 +43,7 @@ except ImportError, ex:
     requests = None
     print "%s: %s\nWARNING: Video size information will not be available.\nPlease install Requests v1.2.0 or later: https://pypi.python.org/pypi/requests\n" % (ex.__class__.__name__, ex)
 
+SE = stdout.encoding
 TIME_FORMAT = '%Y-%m-%d %H:%M:%S'
 
 isWindows = platform.lower().startswith('win')
@@ -415,7 +416,7 @@ class VimeoDownloader(object): # pylint: disable=R0902
                                     self.logger.error("Page load failed")
                                     self.errors += 1
                 if title:
-                    self.logger.info("Folder: %s", title.encode(stdout.encoding, 'replace'))
+                    self.logger.info("Folder: %s", title.encode(SE, 'replace'))
                     if self.doCreateFolders:
                         dirName = self.createDir(cleanupFileName(title.strip().rstrip('.'))) # unicode
                         url.createFile(dirName)
@@ -437,7 +438,7 @@ class VimeoDownloader(object): # pylint: disable=R0902
         for i in count():
             try:
                 self.goTo(vID)
-                title = self.getElement('h1[itemprop=name]').text.strip().rstrip('.').encode(stdout.encoding, 'replace')
+                title = self.getElement('h1[itemprop=name]').text.strip().rstrip('.').encode(SE, 'replace')
                 self.driver.find_element_by_link_text('Download').click()
                 download = self.getElement('#download_videos')
                 break
@@ -459,7 +460,7 @@ class VimeoDownloader(object): # pylint: disable=R0902
         if link: # Parse chosen download link
             tokens = link.text.split() # unicode
             extension = tokens[1].strip('.') # unicode
-            description = ('%s/%s' % (tokens[0], extension.upper())).encode(stdout.encoding, 'replace')
+            description = ('%s/%s' % (tokens[0], extension.upper())).encode(SE, 'replace')
             link = str(link.get_attribute('href'))
             if self.getFileSizes:
                 try:
@@ -477,7 +478,7 @@ class VimeoDownloader(object): # pylint: disable=R0902
         suffix = ' '.join((('%d/%d %d%%' % (number, len(self.vIDs), int(number * 100.0 / len(self.vIDs)))),)
                         + ((readableSize(self.totalFileSize),) if self.totalFileSize else ()))
         self.logger.info(' '.join((prefix, suffix)))
-        fileName = cleanupFileName('%s.%s' % (' '.join((str(vID),) + ((title.decode(stdout.encoding),) if title else ())), extension.lower())) # unicode
+        fileName = cleanupFileName('%s.%s' % (' '.join(((title.decode(SE),) if title else ()) + (str(vID),)), extension.lower())) # unicode
         # Creating target file, if it doesn't exist
         targetFileName = join(self.targetDirectory, fileName)
         if not isfile(targetFileName):
@@ -485,7 +486,7 @@ class VimeoDownloader(object): # pylint: disable=R0902
         if link: # Creating download script entry
             prefix = cleanupForShell('Downloading ' + prefix)
             suffix = cleanupForShell('Downloaded ' + suffix)
-            command = self.downloadCommand.replace('%s', link).replace('%t', fileName.encode(stdout.encoding))
+            command = self.downloadCommand.replace('%s', link).replace('%t', fileName.encode(SE))
             self.downloadScript.write(SCRIPT_COMMAND % (prefix, cleanupForShell('> ' + command), command, suffix))
         # Creating symbolic links, if enabled
         for dirName in (dirName for (dirName, vIDs) in self.folders if vID in vIDs):
@@ -498,7 +499,7 @@ class VimeoDownloader(object): # pylint: disable=R0902
             try:
                 symlink(join('..', fileName), linkFileName)
             except Exception, e:
-                self.logger.warning("Can't create link at %s: %s", linkFileName.encode(stdout.encoding), e)
+                self.logger.warning("Can't create link at %s: %s", linkFileName.encode(SE), e)
                 self.errors += 1
 
     def run(self):
