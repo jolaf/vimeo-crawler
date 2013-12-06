@@ -65,7 +65,7 @@ echo %%s
 echo%s
 ''' % (EMPTY_ECHO, EMPTY_ECHO)
 
-TITLE = 'VimeoCrawler v1.12 (c) 2013 Vasily Zakharov vmzakhar@gmail.com'
+TITLE = 'VimeoCrawler v1.13 (c) 2013 Vasily Zakharov vmzakhar@gmail.com'
 
 OPTION_NAMES = ('download', 'login', 'max-items', 'retries', 'target', 'webdriver')
 FIELD_NAMES = ('downloadCommandTemplate', 'credentials', 'maxItems', 'retryCount', 'targetDirectory', 'driverName')
@@ -440,7 +440,7 @@ class VimeoDownloader(object): # pylint: disable=R0902
                 self.goTo(vID)
                 title = self.getElement('h1[itemprop=name]').text.strip().rstrip('.').encode(SE, 'replace')
                 self.driver.find_element_by_link_text('Download').click()
-                download = self.getElement('#download_videos')
+                download = self.getElement('#download')
                 break
             except NoSuchElementException, e:
                 self.logger.warning(e.msg)
