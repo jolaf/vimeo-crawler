@@ -439,7 +439,7 @@ class VimeoDownloader(object): # pylint: disable=R0902
             try:
                 self.goTo(vID)
                 title = self.getElement('h1[itemprop=name]').text.strip().rstrip('.').encode(SE, 'replace')
-                self.driver.find_element_by_link_text('Download').click()
+                self.driver.find_element_by_class_name('iconify_down_b').click()
                 download = self.getElement('#download')
                 break
             except NoSuchElementException, e:
