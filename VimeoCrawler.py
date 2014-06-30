@@ -18,7 +18,7 @@ try: # Selenium configuration
     from selenium.common.exceptions import NoSuchElementException
     DRIVERS = dict((v.lower(), (v, getattr(webdriver, v))) for v in vars(webdriver) if v[0].isupper()) # ToDo: Make this list more precise
 except ImportError, ex:
-    print "%s: %s\nERROR: This software requires Selenium.\nPlease install Selenium v2.32.0 or later: https://pypi.python.org/pypi/selenium\n" % (ex.__class__.__name__, ex)
+    print "%s: %s\nERROR: This software requires Selenium.\nPlease install Selenium v2.42.1 or later: https://pypi.python.org/pypi/selenium\n" % (ex.__class__.__name__, ex)
     exit(-1)
 
 try: # Filesystem symbolic links configuration
@@ -26,8 +26,8 @@ try: # Filesystem symbolic links configuration
 except ImportError:
     global symlink # pylint: disable=W0604
     try:
-        import ctypes
-        dll = ctypes.windll.LoadLibrary('kernel32.dll')
+        from ctypes import windll
+        dll = windll.LoadLibrary('kernel32.dll')
         def symlink(source, linkName):
             if not dll.CreateSymbolicLinkW(linkName, source, 0):
                 raise OSError("code %d" % dll.GetLastError())
@@ -43,10 +43,12 @@ except ImportError, ex:
     requests = None
     print "%s: %s\nWARNING: Video size information will not be available.\nPlease install Requests v1.2.0 or later: https://pypi.python.org/pypi/requests\n" % (ex.__class__.__name__, ex)
 
-SE = stdout.encoding
+isWindows = platform.lower().startswith('win')
+
+SE = stdout.encoding or ('cp866' if isWindows else 'utf-8')
+
 TIME_FORMAT = '%Y-%m-%d %H:%M:%S'
 
-isWindows = platform.lower().startswith('win')
 EMPTY_ECHO = '.' if isWindows else ''
 DOWNLOAD_SCRIPT = 'download.cmd' if isWindows else 'download.sh'
 DOWNLOAD_HEADER = ('@echo off\n' if isWindows else '#/bin/sh\n') + '''\
@@ -55,7 +57,7 @@ echo VimeoCrawler download script
 echo Generated at %%s
 echo%s
 ''' % (EMPTY_ECHO, EMPTY_ECHO)
-DOWNLOAD_COMMAND = 'wget --header "%c" -t %r --retry-connrefused -c -O "%t" "%s"'
+DOWNLOAD_COMMAND = 'wget --user-agent "%a" %c -t %r --retry-connrefused -c -O "%t" "%s"'
 SCRIPT_COMMAND = '''\
 echo %%s
 echo %%s
@@ -65,7 +67,7 @@ echo %%s
 echo%s
 ''' % (EMPTY_ECHO, EMPTY_ECHO)
 
-TITLE = 'VimeoCrawler v1.13 (c) 2013 Vasily Zakharov vmzakhar@gmail.com'
+TITLE = 'VimeoCrawler v1.2 (c) 2013-2014 Vasily Zakharov vmzakhar@gmail.com'
 
 OPTION_NAMES = ('download', 'login', 'max-items', 'retries', 'target', 'webdriver')
 FIELD_NAMES = ('downloadCommandTemplate', 'credentials', 'maxItems', 'retryCount', 'targetDirectory', 'driverName')
@@ -110,7 +112,8 @@ Options:
 The default is: %s
                 %%s inserts the URL to download
                 %%t inserts the output file name
-                %%c inserts Vimeo cookie
+                %%a inserts browser user agent
+                %%c inserts Vimeo cookies
                 %%r inserts number of retries in case of error
 
 If start URL is not specified, the login credentials have to be specified.
@@ -129,7 +132,6 @@ LOG_FILE_NAME = 'VimeoCrawler.log'
 
 VIMEO = 'vimeo.com'
 VIMEO_URL = 'https://%s/%%s' % VIMEO
-COOKIE = 'vimeo'
 
 SYSTEM_LINKS = ('about', 'blog', 'categories', 'channels', 'cookie_policy', 'couchmode', 'creativecommons', 'creatorservices', 'dmca', 'enhancer', 'everywhere', 'explore', 'groups', 'help', 'jobs', 'join', 'log_in', 'love', 'musicstore', 'ondemand', 'plus', 'privacy', 'pro', 'robots.txt', 'search', 'site_map', 'staffpicks', 'terms', 'upload', 'videoschool') # http://vimeo.com/link
 CATEGORIES_LINKS = ('albums', 'groups', 'channels') # http://vimeo.com/account/category
@@ -512,7 +514,7 @@ class VimeoDownloader(object): # pylint: disable=R0902
         self.downloadScript = None
         self.errors = 0
         try:
-            self.logger.info("Starting %s..." % self.driverName)
+            self.logger.info("Starting %s...", self.driverName)
             self.driver = self.driverClass() # ToDo: Provide parameters to the driver
             if self.credentials:
                 self.login(*self.credentials)
@@ -524,8 +526,10 @@ class VimeoDownloader(object): # pylint: disable=R0902
             if self.vIDs:
                 assert len(self.vIDs) == len(set(self.vIDs))
                 self.logger.info("Processing %d videos...", len(self.vIDs))
-                cookie = self.driver.get_cookie(COOKIE)
-                self.downloadCommand = self.downloadCommandTemplate.replace('%c', 'Cookie: %s=%s' % (COOKIE, str(cookie['value'])) if cookie else '').replace('%r', str(self.retryCount))
+                userAgent = str(self.driver.execute_script("return window.navigator.userAgent"))
+                cookies = self.driver.get_cookies()
+                headers = ('--header "Cookie: %s=%s"' % (str(cookie['name']), str(cookie['value'])) for cookie in cookies)
+                self.downloadCommand = self.downloadCommandTemplate.replace('%a', userAgent).replace('%c', ' '.join(headers)).replace('%r', str(self.retryCount))
                 self.downloadScript = open(self.downloadScriptFileName, 'w')
                 self.downloadScript.write(DOWNLOAD_HEADER % datetime.now().strftime(TIME_FORMAT))
                 if self.getFileSizes:
@@ -543,7 +547,7 @@ class VimeoDownloader(object): # pylint: disable=R0902
         self.logger.info("Crawling completed"
                        + (' with %d errors' % self.errors if self.errors else '')
                        + (", download script saved to %s" % self.downloadScriptFileName if self.downloadScript else ''))
-        if self.go and self.vIDs and not self.errors:
+        if self.go and self.vIDs: # and not self.errors:
             try:
                 self.logger.info("Running download script...")
                 subprocess = Popen(abspath(self.downloadScriptFileName), cwd = self.targetDirectory or '.', shell = True)
