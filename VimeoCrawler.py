@@ -1,25 +1,46 @@
 #!/usr/bin/python
-from datetime import datetime
 from getopt import getopt
 from itertools import count
 from logging import getLogger, Formatter, FileHandler, StreamHandler, DEBUG, INFO, WARNING
 from re import match
-from os import chmod, makedirs, remove, stat
-from os.path import abspath, isdir, isfile, join, lexists
-from subprocess import Popen
-from sys import argv, exit, platform, stdout # pylint: disable=W0622
+from os import makedirs, remove
+from os.path import isdir, join, lexists
+from sys import argv, exit, getfilesystemencoding, platform, stdout # pylint: disable=W0622
 from traceback import format_exc
 
 try: # Selenium configuration
     import selenium
-    if selenium.__version__.split('.') < ['2', '32', '0']:
-        raise ImportError('Selenium version %s < 2.32.0' % selenium.__version__)
+    if selenium.__version__.split('.') < ['2', '42', '1']:
+        raise ImportError('Selenium version %s < 2.42.1' % selenium.__version__)
     from selenium import webdriver
     from selenium.common.exceptions import NoSuchElementException
     DRIVERS = dict((v.lower(), (v, getattr(webdriver, v))) for v in vars(webdriver) if v[0].isupper()) # ToDo: Make this list more precise
 except ImportError, ex:
     print "%s: %s\nERROR: This software requires Selenium.\nPlease install Selenium v2.42.1 or later: https://pypi.python.org/pypi/selenium\n" % (ex.__class__.__name__, ex)
     exit(-1)
+
+try: # pycurl downloader library
+    import pycurl # required by urlgrabber # pylint: disable=W0611
+except ImportError, ex:
+    print "%s: %s\nERROR: This software requires pycurl.\nPlease install pycurl v7.19.3.1 or later: https://pypi.python.org/pypi/pycurl\n" % (ex.__class__.__name__, ex)
+    exit(-1)
+
+try: # urlgrabber downloader library, requires pycurl
+    import urlgrabber
+    from urlgrabber.grabber import URLGrabber, URLGrabError
+    if urlgrabber.__version__.split('.') < ['3', '9', '1']:
+        raise ImportError('urlgrabber version %s < 3.9.1' % urlgrabber.__version__)
+except ImportError, ex:
+    print "%s: %s\nERROR: This software requires urlgrabber.\nPlease install urlgrabber v3.9.1 or later: https://pypi.python.org/pypi/urlgrabber\n" % (ex.__class__.__name__, ex)
+    exit(-1)
+
+try: # Requests HTTP library
+    import requests
+    if requests.__version__.split('.') < ['2', '3', '0']:
+        raise ImportError('Requests version %s < 2.3.0' % requests.__version__)
+except ImportError, ex:
+    requests = None
+    print "%s: %s\nWARNING: Video size information will not be available.\nPlease install Requests v2.3.0 or later: https://pypi.python.org/pypi/requests\n" % (ex.__class__.__name__, ex)
 
 try: # Filesystem symbolic links configuration
     from os import symlink # UNIX # pylint: disable=E0611
@@ -35,44 +56,14 @@ except ImportError:
         symlink = None
         print "%s: %s\nWARNING: Filesystem links will not be available.\nPlease run on UNIX or Windows Vista or later.\n" % (ex.__class__.__name__, ex)
 
-try: # Requests HTTP library
-    import requests
-    if requests.__version__.split('.') < ['1', '2', '0']:
-        raise ImportError('Requests version %s < 1.2.0' % requests.__version__)
-except ImportError, ex:
-    requests = None
-    print "%s: %s\nWARNING: Video size information will not be available.\nPlease install Requests v1.2.0 or later: https://pypi.python.org/pypi/requests\n" % (ex.__class__.__name__, ex)
-
 isWindows = platform.lower().startswith('win')
-
-SE = stdout.encoding or ('cp866' if isWindows else 'utf-8')
-
-TIME_FORMAT = '%Y-%m-%d %H:%M:%S'
-
-EMPTY_ECHO = '.' if isWindows else ''
-DOWNLOAD_SCRIPT = 'download.cmd' if isWindows else 'download.sh'
-DOWNLOAD_HEADER = ('@echo off\n' if isWindows else '#/bin/sh\n') + '''\
-echo%s
-echo VimeoCrawler download script
-echo Generated at %%s
-echo%s
-''' % (EMPTY_ECHO, EMPTY_ECHO)
-DOWNLOAD_COMMAND = 'wget --user-agent "%a" %c -t %r --retry-connrefused -c -O "%t" "%s"'
-SCRIPT_COMMAND = '''\
-echo %%s
-echo %%s
-echo%s
-%%s
-echo %%s
-echo%s
-''' % (EMPTY_ECHO, EMPTY_ECHO)
 
 TITLE = 'VimeoCrawler v1.2 (c) 2013-2014 Vasily Zakharov vmzakhar@gmail.com'
 
-OPTION_NAMES = ('download', 'login', 'max-items', 'retries', 'target', 'webdriver')
-FIELD_NAMES = ('downloadCommandTemplate', 'credentials', 'maxItems', 'retryCount', 'targetDirectory', 'driverName')
-SHORT_OPTIONS = ''.join(('%c:' % option[0]) for option in OPTION_NAMES) + 'fghsv'
-LONG_OPTIONS = tuple(('%s=' % option) for option in OPTION_NAMES) + ('no-folders', 'go', 'help', 'no-sizes', 'verbose')
+OPTION_NAMES = ('login', 'max-items', 'retries', 'target', 'webdriver')
+FIELD_NAMES = ('credentials', 'maxItems', 'retryCount', 'targetDirectory', 'driverName')
+SHORT_OPTIONS = ''.join(('%c:' % option[0]) for option in OPTION_NAMES) + 'fhsv'
+LONG_OPTIONS = tuple(('%s=' % option) for option in OPTION_NAMES) + ('no-folders', 'help', 'no-sizes', 'verbose')
 
 USAGE_INFO = '''Usage: python VimeoCrawler.py [options] [start URL or video ID]
 
@@ -80,24 +71,17 @@ The crawler checks the specified URL and processes the specified video,
 album, channel or the whole account, trying to locate the highest available
 quality file for each video.
 
-For every video found a zero-sized file is created in the target directory.
+For every video found a file is downloaded to the target directory.
 For any channel or album encountered, a subfolder is created in the target
 directory, with symbolic links to the files in the target directory.
 
-Also, a download script is created, that can be run to download all the videos.
-Both the crawler and the download script can be run repeatedly with the same
-start URL and target directory to update the list of videos, download the newly
-added videos and continue the interrupted downloads.
-
-In default configuration, the program requires Mozilla Firefox and wget tool
-to download the videos.
+In default configuration, the program requires Mozilla Firefox.
 
 Options:
 -h --help - Displays this help message.
 -v --verbose - Provide verbose logging.
 -f --no-folders - Do not create subfolders with links for channels and albums.
 -s --no-sizes - Do not get file sizes for videos (speeds up crawling a bit).
--g --go - Run the generated download script after crawling completes.
 
 -l --login - Vimeo login credentials, formatted as email:password.
 -t --target - Target directory to save all the output files to,
@@ -108,17 +92,9 @@ Options:
 -m --max-items - Maximum number of items (videos or folders) to retrieve
                  from one page (usable for testing).
 
--d --download - A command to use to download a file, remember to quote it.
-The default is: %s
-                %%s inserts the URL to download
-                %%t inserts the output file name
-                %%a inserts browser user agent
-                %%c inserts Vimeo cookies
-                %%r inserts number of retries in case of error
-
 If start URL is not specified, the login credentials have to be specified.
 In that case, the whole account for those credentials would be crawled.
-''' % DOWNLOAD_COMMAND
+'''
 
 def usage(error = None):
     '''Prints usage information (preceded by optional error message) and exits with code 2.'''
@@ -156,16 +132,13 @@ INVALID_FILENAME_CHARS = ':/\\\'"?*' # for file names, to be replaced with _
 def cleanupFileName(fileName):
     return ''.join('_' if c in INVALID_FILENAME_CHARS else c for c in fileName)
 
-WINDOWS_INVALID_SHELL_CHARS = '<>'
-UNIX_INVALID_SHELL_CHARS = '\\"`$'
-def cleanupForShell(s):
-    if isWindows:
-        for c in WINDOWS_INVALID_SHELL_CHARS:
-            s = s.replace(c, '^' + c)
-        return s.replace('%', '%%')
-    for c in UNIX_INVALID_SHELL_CHARS:
-        s = s.replace(c, '\\' + c)
-    return '"%s"' % s
+CONSOLE_ENCODING = stdout.encoding or ('cp866' if isWindows else 'UTF-8')
+def encodeForConsole(s):
+    return s.encode(CONSOLE_ENCODING, 'replace')
+
+FILE_SYSTEM_ENCODING = getfilesystemencoding()
+def encodeForFileSystem(s):
+    return s.encode(FILE_SYSTEM_ENCODING, 'replace')
 
 class URL(object):
     FILE_NAME = 'source.url'
@@ -216,7 +189,7 @@ class URL(object):
     def __cmp__(self, other):
         return 1 if self.url > other.url else -1 if self.url < other.url else 0
 
-class VimeoDownloader(object): # pylint: disable=R0902
+class VimeoDownloader(object):
     def __init__(self, args):
         # Simple options
         self.go = False
@@ -231,8 +204,6 @@ class VimeoDownloader(object): # pylint: disable=R0902
         self.maxItems = None
         self.retryCount = 5
         self.targetDirectory = ''
-        self.downloadScriptFileName = None
-        self.downloadCommandTemplate = DOWNLOAD_COMMAND
         self.startURL = None
         try:
             # Reading command line options
@@ -296,7 +267,6 @@ class VimeoDownloader(object): # pylint: disable=R0902
             self.createDir()
             if self.startURL:
                 self.startURL.createFile(self.targetDirectory)
-            self.downloadScriptFileName = join(self.targetDirectory, DOWNLOAD_SCRIPT)
             # Configuring logging
             rootLogger = getLogger()
             if not rootLogger.handlers:
@@ -364,7 +334,7 @@ class VimeoDownloader(object): # pylint: disable=R0902
 
     def getItemsFromFolder(self):
         items = []
-        for i in xrange(self.maxItems) if self.maxItems != None else count(): # pylint: disable=W0612
+        for _ in xrange(self.maxItems) if self.maxItems != None else count():
             items.extend(self.getItemsFromPage())
             try:
                 self.getElement('.pagination a[rel=next]').click()
@@ -418,7 +388,7 @@ class VimeoDownloader(object): # pylint: disable=R0902
                                     self.logger.error("Page load failed")
                                     self.errors += 1
                 if title:
-                    self.logger.info("Folder: %s", title.encode(SE, 'replace'))
+                    self.logger.info("Folder: %s", encodeForConsole(title))
                     if self.doCreateFolders:
                         dirName = self.createDir(cleanupFileName(title.strip().rstrip('.'))) # unicode
                         url.createFile(dirName)
@@ -440,7 +410,7 @@ class VimeoDownloader(object): # pylint: disable=R0902
         for i in count():
             try:
                 self.goTo(vID)
-                title = self.getElement('h1[itemprop=name]').text.strip().rstrip('.').encode(SE, 'replace')
+                title = encodeForConsole(self.getElement('h1[itemprop=name]').text.strip().rstrip('.'))
                 self.driver.find_element_by_class_name('iconify_down_b').click()
                 download = self.getElement('#download')
                 break
@@ -462,7 +432,7 @@ class VimeoDownloader(object): # pylint: disable=R0902
         if link: # Parse chosen download link
             tokens = link.text.split() # unicode
             extension = tokens[1].strip('.') # unicode
-            description = ('%s/%s' % (tokens[0], extension.upper())).encode(SE, 'replace')
+            description = encodeForConsole('%s/%s' % (tokens[0], extension.upper()))
             link = str(link.get_attribute('href'))
             if self.getFileSizes:
                 try:
@@ -480,16 +450,43 @@ class VimeoDownloader(object): # pylint: disable=R0902
         suffix = ' '.join((('%d/%d %d%%' % (number, len(self.vIDs), int(number * 100.0 / len(self.vIDs)))),)
                         + ((readableSize(self.totalFileSize),) if self.totalFileSize else ()))
         self.logger.info(' '.join((prefix, suffix)))
-        fileName = cleanupFileName('%s.%s' % (' '.join(((title.decode(SE),) if title else ()) + (str(vID),)), extension.lower())) # unicode
-        # Creating target file, if it doesn't exist
-        targetFileName = join(self.targetDirectory, fileName)
-        if not isfile(targetFileName):
-            open(targetFileName, 'w').close()
-        if link: # Creating download script entry
-            prefix = cleanupForShell('Downloading ' + prefix)
-            suffix = cleanupForShell('Downloaded ' + suffix)
-            command = self.downloadCommand.replace('%s', link).replace('%t', fileName.encode(SE))
-            self.downloadScript.write(SCRIPT_COMMAND % (prefix, cleanupForShell('> ' + command), command, suffix))
+        fileName = cleanupFileName('%s.%s' % (' '.join(((title.decode(CONSOLE_ENCODING),) if title else ()) + (str(vID),)), extension.lower())) # unicode
+        targetFileName = encodeForFileSystem(join(self.targetDirectory, fileName))
+        if link: # Downloading file
+            class ProgressIndicator(object):
+                QUANTUM = 10 * 1024 * 1024 # 10 megabytes
+                def start(self, *_args, **kwargs):
+                    self.length = kwargs.get('length') or kwargs.get('size')
+                    self.count = 0
+                    stdout.write("Dowloading: ")
+                    stdout.flush()
+                def update(self, read):
+                    oldCount = self.count
+                    self.count = int((read + 0.5) // self.QUANTUM)
+                    for _ in xrange(oldCount, self.count):
+                        stdout.write('+' if self.count and not oldCount else '=')
+                        stdout.flush()
+                def end(self, _read): # pylint: disable=R0201
+                    stdout.write('\n')
+                    stdout.flush()
+            userAgent = str(self.driver.execute_script('return window.navigator.userAgent'))
+            cookies = self.driver.get_cookies()
+            grabber = URLGrabber(reget = 'simple', retry = self.retryCount, user_agent = userAgent,
+                http_headers = tuple((str(cookie['name']), str(cookie['value'])) for cookie in cookies),
+                progress_obj = ProgressIndicator())
+            for i in xrange(self.retryCount + 1):
+                try:
+                    grabber.urlgrab(link, filename = targetFileName)
+                    self.logger.info("OK")
+                    break
+                except URLGrabError, e:
+                    if e.errno == 14 and e.code == 22 and '416' in e.exception[1]: # pylint: disable=W0713
+                        self.logger.info("OK")
+                        break
+                    elif i >= self.retryCount:
+                        self.errors += 1
+                        self.logger.error("Download failed: %s", e)
+
         # Creating symbolic links, if enabled
         for dirName in (dirName for (dirName, vIDs) in self.folders if vID in vIDs):
             linkFileName = join(dirName, fileName) # unicode
@@ -501,7 +498,7 @@ class VimeoDownloader(object): # pylint: disable=R0902
             try:
                 symlink(join('..', fileName), linkFileName)
             except Exception, e:
-                self.logger.warning("Can't create link at %s: %s", linkFileName.encode(SE), e)
+                self.logger.warning("Can't create link at %s: %s", encodeForConsole(linkFileName), e)
                 self.errors += 1
 
     def run(self):
@@ -510,8 +507,6 @@ class VimeoDownloader(object): # pylint: disable=R0902
         self.vIDs = []
         self.folders = []
         self.totalFileSize = 0
-        self.downloadCommand = None
-        self.downloadScript = None
         self.errors = 0
         try:
             self.logger.info("Starting %s...", self.driverName)
@@ -526,38 +521,17 @@ class VimeoDownloader(object): # pylint: disable=R0902
             if self.vIDs:
                 assert len(self.vIDs) == len(set(self.vIDs))
                 self.logger.info("Processing %d videos...", len(self.vIDs))
-                userAgent = str(self.driver.execute_script("return window.navigator.userAgent"))
-                cookies = self.driver.get_cookies()
-                headers = ('--header "Cookie: %s=%s"' % (str(cookie['name']), str(cookie['value'])) for cookie in cookies)
-                self.downloadCommand = self.downloadCommandTemplate.replace('%a', userAgent).replace('%c', ' '.join(headers)).replace('%r', str(self.retryCount))
-                self.downloadScript = open(self.downloadScriptFileName, 'w')
-                self.downloadScript.write(DOWNLOAD_HEADER % datetime.now().strftime(TIME_FORMAT))
                 if self.getFileSizes:
                     requests.adapters.DEFAULT_RETRIES = self.retryCount
                 for (n, vID) in enumerate(self.vIDs, 1):
                     self.processVideo(vID, n)
-                self.downloadScript.close()
-                chmod(self.downloadScriptFileName, stat(self.downloadScriptFileName).st_mode | 0o111) # chmod a+x
         except Exception, e:
             self.logger.error(format_exc() if self.verbose else e)
             self.errors += 1
         finally:
             if self.driver:
                 self.driver.close()
-        self.logger.info("Crawling completed"
-                       + (' with %d errors' % self.errors if self.errors else '')
-                       + (", download script saved to %s" % self.downloadScriptFileName if self.downloadScript else ''))
-        if self.go and self.vIDs: # and not self.errors:
-            try:
-                self.logger.info("Running download script...")
-                subprocess = Popen(abspath(self.downloadScriptFileName), cwd = self.targetDirectory or '.', shell = True)
-                subprocess.communicate()
-                self.logger.info("Done with code %d", subprocess.returncode) # pylint: disable=E1101
-                if subprocess.returncode: # pylint: disable=E1101
-                    raise Exception('code %d' % subprocess.returncode) # pylint: disable=E1101
-            except Exception, e:
-                self.logger.error(format_exc() if self.verbose else e)
-                self.errors += 1
+        self.logger.info("Crawling completed" + (' with %d errors' % self.errors if self.errors else ''))
         return self.errors
 
 def main(args):
