@@ -58,7 +58,7 @@ except ImportError:
 
 isWindows = platform.lower().startswith('win')
 
-TITLE = 'VimeoCrawler v1.3 (c) 2013-2014 Vasily Zakharov vmzakhar@gmail.com'
+TITLE = 'VimeoCrawler v1.31 (c) 2013-2014 Vasily Zakharov vmzakhar@gmail.com'
 
 OPTION_NAMES = ('login', 'max-items', 'retries', 'target', 'webdriver')
 FIELD_NAMES = ('credentials', 'maxItems', 'retryCount', 'targetDirectory', 'driverName')
@@ -484,9 +484,8 @@ class VimeoDownloader(object):
                             self.started = True
                         oldCount = self.count
                         self.count = int(read // self.QUANTUM) + 1
-                        for _ in xrange(oldCount, self.count):
-                            stdout.write(('=' if self.started else '+') + suffix)
-                            stdout.flush()
+                        stdout.write(('=' if self.started else '+') * (self.count - oldCount) + suffix)
+                        stdout.flush()
                         self.started = True
                     def end(self, read):
                         self.update(read, '!\n')
