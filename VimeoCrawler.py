@@ -4,7 +4,7 @@ from itertools import count
 from logging import getLogger, Formatter, FileHandler, StreamHandler, DEBUG, INFO, WARNING
 from re import match
 from os import makedirs, remove
-from os.path import isdir, join, lexists
+from os.path import getsize, isdir, join, lexists
 from sys import argv, exit, getfilesystemencoding, platform, stdout # pylint: disable=W0622
 from traceback import format_exc
 
@@ -58,7 +58,7 @@ except ImportError:
 
 isWindows = platform.lower().startswith('win')
 
-TITLE = 'VimeoCrawler v1.2 (c) 2013-2014 Vasily Zakharov vmzakhar@gmail.com'
+TITLE = 'VimeoCrawler v1.3 (c) 2013-2014 Vasily Zakharov vmzakhar@gmail.com'
 
 OPTION_NAMES = ('login', 'max-items', 'retries', 'target', 'webdriver')
 FIELD_NAMES = ('credentials', 'maxItems', 'retryCount', 'targetDirectory', 'driverName')
@@ -139,6 +139,12 @@ def encodeForConsole(s):
 FILE_SYSTEM_ENCODING = getfilesystemencoding()
 def encodeForFileSystem(s):
     return s.encode(FILE_SYSTEM_ENCODING, 'replace')
+
+def getFileSize(fileName):
+    try:
+        return getsize(fileName)
+    except:
+        return None
 
 class URL(object):
     FILE_NAME = 'source.url'
@@ -421,7 +427,7 @@ class VimeoDownloader(object):
                     self.errors += 1
                     break
         # Parse download links
-        link = None
+        link = linkSize = localSize = downloadOK = None
         if download:
             for preference in FILE_PREFERENCES:
                 try:
@@ -430,17 +436,19 @@ class VimeoDownloader(object):
                 except NoSuchElementException:
                     pass
         if link: # Parse chosen download link
+            userAgent = str(self.driver.execute_script('return window.navigator.userAgent'))
+            cookies = self.driver.get_cookies()
             tokens = link.text.split() # unicode
             extension = tokens[1].strip('.') # unicode
             description = encodeForConsole('%s/%s' % (tokens[0], extension.upper()))
             link = str(link.get_attribute('href'))
             if self.getFileSizes:
                 try:
-                    request = requests.get(link, stream = True)
+                    request = requests.get(link, stream = True, headers = { 'user-agent': userAgent }, cookies = dict((str(cookie['name']), str(cookie['value'])) for cookie in cookies))
                     request.close()
-                    fileSize = int(request.headers['content-length'])
-                    self.totalFileSize += fileSize
-                    description += ', %s' % readableSize(fileSize)
+                    linkSize = int(request.headers['content-length'])
+                    self.totalFileSize += linkSize
+                    description += ', %s' % readableSize(linkSize)
                 except Exception, e:
                     self.logger.warning(e)
         else:
@@ -453,40 +461,64 @@ class VimeoDownloader(object):
         fileName = cleanupFileName('%s.%s' % (' '.join(((title.decode(CONSOLE_ENCODING),) if title else ()) + (str(vID),)), extension.lower())) # unicode
         targetFileName = encodeForFileSystem(join(self.targetDirectory, fileName))
         if link: # Downloading file
-            class ProgressIndicator(object):
-                QUANTUM = 10 * 1024 * 1024 # 10 megabytes
-                def start(self, *_args, **kwargs):
-                    self.length = kwargs.get('length') or kwargs.get('size')
-                    self.count = 0
-                    stdout.write("Dowloading: ")
-                    stdout.flush()
-                def update(self, read):
-                    oldCount = self.count
-                    self.count = int((read + 0.5) // self.QUANTUM)
-                    for _ in xrange(oldCount, self.count):
-                        stdout.write('+' if self.count and not oldCount else '=')
+            if linkSize:
+                localSize = getFileSize(targetFileName)
+                if localSize == linkSize:
+                    downloadOK = True
+                elif localSize > linkSize:
+                    self.errors += 1
+                    self.logger.error("Local file larger (%d) than remote file (%d), removing", localSize, linkSize)
+                    remove(targetFileName)
+                    localSize = None
+            if not downloadOK:
+                class ProgressIndicator(object):
+                    QUANTUM = 10 * 1024 * 1024 # 10 megabytes
+                    def start(self, *_args, **kwargs):
+                        self.length = kwargs.get('length') or kwargs.get('size')
+                        self.started = False
+                        self.count = 0
+                        stdout.write("Dowloading: ")
                         stdout.flush()
-                def end(self, _read): # pylint: disable=R0201
-                    stdout.write('\n')
-                    stdout.flush()
-            userAgent = str(self.driver.execute_script('return window.navigator.userAgent'))
-            cookies = self.driver.get_cookies()
-            grabber = URLGrabber(reget = 'simple', retry = self.retryCount, user_agent = userAgent,
-                http_headers = tuple((str(cookie['name']), str(cookie['value'])) for cookie in cookies),
-                progress_obj = ProgressIndicator())
-            for i in xrange(self.retryCount + 1):
-                try:
-                    grabber.urlgrab(link, filename = targetFileName)
-                    self.logger.info("OK")
-                    break
-                except URLGrabError, e:
-                    if e.errno == 14 and e.code == 22 and '416' in e.exception[1]: # pylint: disable=W0713
-                        self.logger.info("OK")
+                    def update(self, read, suffix = ''):
+                        if read == 0:
+                            self.started = True
+                        oldCount = self.count
+                        self.count = int(read // self.QUANTUM) + 1
+                        for _ in xrange(oldCount, self.count):
+                            stdout.write(('=' if self.started else '+') + suffix)
+                            stdout.flush()
+                        self.started = True
+                    def end(self, read):
+                        self.update(read, '!\n')
+                grabber = URLGrabber(reget = 'simple', retry = self.retryCount, timeout = 60, user_agent = userAgent,
+                    http_headers = tuple((str(cookie['name']), str(cookie['value'])) for cookie in cookies),
+                    progress_obj = ProgressIndicator())
+                for i in xrange(self.retryCount + 1):
+                    try:
+                        grabber.urlgrab(link, filename = targetFileName)
+                        downloadOK = True
                         break
-                    elif i >= self.retryCount:
+                    except URLGrabError, e:
+                        if i >= self.retryCount:
+                            self.errors += 1
+                            self.logger.error("Download failed: %s", e)
+                if downloadOK:
+                    localSize = getFileSize(targetFileName)
+                    if not localSize:
                         self.errors += 1
-                        self.logger.error("Download failed: %s", e)
-
+                        downloadOK = False
+                        self.logger.error("Downloaded file seems corrupt")
+                    elif linkSize:
+                        if localSize > linkSize:
+                            self.errors += 1
+                            downloadOK = False
+                            self.logger.error("Downloaded file larger (%d) than remote file (%d)", localSize, linkSize)
+                        elif localSize < linkSize:
+                            self.errors += 1
+                            downloadOK = False
+                            self.logger.error("Downloaded file smaller (%d) than remote file (%d)", localSize, linkSize)
+            if downloadOK:
+                self.logger.info("OK")
         # Creating symbolic links, if enabled
         for dirName in (dirName for (dirName, vIDs) in self.folders if vID in vIDs):
             linkFileName = join(dirName, fileName) # unicode
