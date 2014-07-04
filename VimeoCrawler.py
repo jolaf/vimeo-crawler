@@ -58,10 +58,10 @@ except ImportError:
 
 isWindows = platform.lower().startswith('win')
 
-TITLE = 'VimeoCrawler v1.31 (c) 2013-2014 Vasily Zakharov vmzakhar@gmail.com'
+TITLE = 'VimeoCrawler v1.32 (c) 2013-2014 Vasily Zakharov vmzakhar@gmail.com'
 
-OPTION_NAMES = ('login', 'max-items', 'retries', 'target', 'webdriver')
-FIELD_NAMES = ('credentials', 'maxItems', 'retryCount', 'targetDirectory', 'driverName')
+OPTION_NAMES = ('login', 'max-items', 'timeout', 'retries', 'directory', 'webdriver')
+FIELD_NAMES = ('credentials', 'maxItems', 'timeout', 'retryCount', 'targetDirectory', 'driverName')
 SHORT_OPTIONS = ''.join(('%c:' % option[0]) for option in OPTION_NAMES) + 'fhsv'
 LONG_OPTIONS = tuple(('%s=' % option) for option in OPTION_NAMES) + ('no-folders', 'help', 'no-sizes', 'verbose')
 
@@ -84,13 +84,14 @@ Options:
 -s --no-sizes - Do not get file sizes for videos (speeds up crawling a bit).
 
 -l --login - Vimeo login credentials, formatted as email:password.
--t --target - Target directory to save all the output files to,
+-d --directory - Target directory to save all the output files to,
               default is the current directory.
 
--w --webdriver - Selenium WebDriver to use for crawling, defaults to Firefox.
--r --retries - Number of attempts to reload a page that seems failed to load.
+-w --webdriver - Selenium WebDriver to use for crawling, default is Firefox.
+-t -- timeout - Download attempt timeout, default is 60 seconds.
+-r --retries - Number of page download retry attempts, default is 3.
 -m --max-items - Maximum number of items (videos or folders) to retrieve
-                 from one page (usable for testing).
+                 from one page (usable for testing), default is none.
 
 If start URL is not specified, the login credentials have to be specified.
 In that case, the whole account for those credentials would be crawled.
@@ -208,7 +209,8 @@ class VimeoDownloader(object):
         self.driverClass = None
         self.credentials = None
         self.maxItems = None
-        self.retryCount = 5
+        self.timeout = 60
+        self.retryCount = 3
         self.targetDirectory = ''
         self.startURL = None
         try:
@@ -256,11 +258,17 @@ class VimeoDownloader(object):
                 except ValueError:
                     raise ValueError("-m / --max-items parameter must be a non-negative integer")
             try:
+                self.timeout = int(self.timeout)
+                if self.timeout < 0:
+                    raise ValueError
+            except ValueError:
+                raise ValueError("-t / --timeout parameter must be a non-negative integer")
+            try:
                 self.retryCount = int(self.retryCount)
                 if self.retryCount < 0:
                     raise ValueError
             except ValueError:
-                raise ValueError("-r / --retries parameter must be non-negative integer")
+                raise ValueError("-r / --retries parameter must be a non-negative integer")
             if len(parameters) > 1:
                 raise Exception("Too many parameters")
             if parameters:
@@ -489,7 +497,7 @@ class VimeoDownloader(object):
                         self.started = True
                     def end(self, read):
                         self.update(read, '!\n')
-                grabber = URLGrabber(reget = 'simple', retry = self.retryCount, timeout = 60, user_agent = userAgent,
+                grabber = URLGrabber(reget = 'simple', timeout = self.timeout, retry = self.retryCount, user_agent = userAgent,
                     http_headers = tuple((str(cookie['name']), str(cookie['value'])) for cookie in cookies),
                     progress_obj = ProgressIndicator())
                 for i in xrange(self.retryCount + 1):
