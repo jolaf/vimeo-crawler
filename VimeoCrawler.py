@@ -3,10 +3,13 @@ from getopt import getopt
 from itertools import count
 from logging import getLogger, Formatter, FileHandler, StreamHandler, DEBUG, INFO, WARNING
 from re import match
-from os import makedirs, remove
+from os import fdopen, makedirs, remove
 from os.path import getsize, isdir, join, lexists
 from sys import argv, exit, getfilesystemencoding, platform, stdout # pylint: disable=W0622
+from time import sleep
 from traceback import format_exc
+
+stdout = fdopen(stdout.fileno(), 'w', 0)
 
 try: # Selenium configuration
     import selenium
@@ -58,7 +61,7 @@ except ImportError:
 
 isWindows = platform.lower().startswith('win')
 
-TITLE = 'VimeoCrawler v1.32 (c) 2013-2014 Vasily Zakharov vmzakhar@gmail.com'
+TITLE = 'VimeoCrawler v1.4 (c) 2013-2014 Vasily Zakharov vmzakhar@gmail.com'
 
 OPTION_NAMES = ('login', 'max-items', 'timeout', 'retries', 'directory', 'webdriver')
 FIELD_NAMES = ('credentials', 'maxItems', 'timeout', 'retryCount', 'targetDirectory', 'driverName')
@@ -320,6 +323,7 @@ class VimeoDownloader(object):
             self.getElement('#password').send_keys(password)
             self.getElement('#login_form input[type=submit]').click()
             self.getElement('#menu .me a').click()
+            sleep(1) # prevents occasional login fails
             self.loggedIn = True
         except NoSuchElementException, e:
             self.logger.error("Login failed: %s", e.msg)
@@ -481,25 +485,43 @@ class VimeoDownloader(object):
             if not downloadOK:
                 class ProgressIndicator(object):
                     QUANTUM = 10 * 1024 * 1024 # 10 megabytes
+                    ACTION = '--//--\\\\' # update() gets called in pairs, this smoothes things up
+
+                    def progress(self, s, suffix = ''):
+                        self.action = (self.action + 1) % len(self.ACTION)
+                        stdout.write('\b%s%s' % (s, suffix + '\n' if suffix else self.ACTION[self.action]))
+
                     def start(self, *_args, **kwargs):
                         self.length = kwargs.get('length') or kwargs.get('size')
                         self.started = False
                         self.count = 0
-                        stdout.write("Dowloading: ")
-                        stdout.flush()
-                    def update(self, read, suffix = ''):
-                        if read == 0:
+                        self.action = len(self.ACTION) - 1
+                        self.progress("Dowloading: ")
+
+                    def update(self, totalRead, suffix = ''):
+                        if totalRead == 0:
                             self.started = True
                         oldCount = self.count
-                        self.count = int(read // self.QUANTUM) + 1
-                        stdout.write(('=' if self.started else '+') * (self.count - oldCount) + suffix)
-                        stdout.flush()
+                        self.count = int(totalRead // self.QUANTUM) + 1
+                        self.progress(('=' if self.started else '+') * (self.count - oldCount), suffix)
                         self.started = True
-                    def end(self, read):
-                        self.update(read, '!\n')
-                grabber = URLGrabber(reget = 'simple', timeout = self.timeout, retry = self.retryCount, user_agent = userAgent,
-                    http_headers = tuple((str(cookie['name']), str(cookie['value'])) for cookie in cookies),
-                    progress_obj = ProgressIndicator())
+
+                    def end(self, totalRead):
+                        self.update(totalRead, 'OK')
+
+                    def interrupt(self, _callback):
+                        self.progress('I')
+
+                    def retry(self, _callback):
+                        self.progress('R')
+
+                    def fail(self):
+                        self.progress('', 'F')
+
+                progressIndicator = ProgressIndicator()
+                grabber = URLGrabber(reget = 'simple', timeout = self.timeout, retry = self.retryCount,
+                    user_agent = userAgent, http_headers = tuple((str(cookie['name']), str(cookie['value'])) for cookie in cookies),
+                    progress_obj = progressIndicator, failure_callback = progressIndicator.retry, interrupt_callback = progressIndicator.interrupt)
                 for i in xrange(self.retryCount + 1):
                     try:
                         grabber.urlgrab(link, filename = targetFileName)
@@ -508,6 +530,7 @@ class VimeoDownloader(object):
                     except URLGrabError, e:
                         if i >= self.retryCount:
                             self.errors += 1
+                            progressIndicator.fail()
                             self.logger.error("Download failed: %s", e)
                 if downloadOK:
                     localSize = getFileSize(targetFileName)
@@ -552,8 +575,8 @@ class VimeoDownloader(object):
             self.driver = self.driverClass() # ToDo: Provide parameters to the driver
             if self.credentials:
                 self.login(*self.credentials)
-            if not self.loggedIn and not self.startURL:
-                raise ValueError("Login failed and no start URL is specified, aborting")
+                if not self.loggedIn:
+                    raise ValueError("Aborting")
             self.getItemsFromURL(self.startURL)
             if self.folders:
                 self.logger.info("Got total of %d folders", len(self.folders))
