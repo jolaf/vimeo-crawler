@@ -61,7 +61,7 @@ except ImportError:
 
 isWindows = platform.lower().startswith('win')
 
-TITLE = 'VimeoCrawler v1.4 (c) 2013-2014 Vasily Zakharov vmzakhar@gmail.com'
+TITLE = 'VimeoCrawler v1.41 (c) 2013-2014 Vasily Zakharov vmzakhar@gmail.com'
 
 OPTION_NAMES = ('login', 'max-items', 'timeout', 'retries', 'directory', 'webdriver')
 FIELD_NAMES = ('credentials', 'maxItems', 'timeout', 'retryCount', 'targetDirectory', 'driverName')
@@ -486,6 +486,7 @@ class VimeoDownloader(object):
                 class ProgressIndicator(object):
                     QUANTUM = 10 * 1024 * 1024 # 10 megabytes
                     ACTION = '--//--\\\\' # update() gets called in pairs, this smoothes things up
+                    action = len(ACTION) - 1
 
                     def progress(self, s, suffix = ''):
                         self.action = (self.action + 1) % len(self.ACTION)
