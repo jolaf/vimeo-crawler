@@ -61,7 +61,7 @@ except ImportError:
 
 isWindows = platform.lower().startswith('win')
 
-TITLE = 'VimeoCrawler v1.41 (c) 2013-2014 Vasily Zakharov vmzakhar@gmail.com'
+TITLE = 'VimeoCrawler v1.42 (c) 2013-2014 Vasily Zakharov vmzakhar@gmail.com'
 
 OPTION_NAMES = ('login', 'max-items', 'timeout', 'retries', 'directory', 'webdriver')
 FIELD_NAMES = ('credentials', 'maxItems', 'timeout', 'retryCount', 'targetDirectory', 'driverName')
@@ -316,18 +316,20 @@ class VimeoDownloader(object):
         return self.driver.find_element_by_css_selector(css)
 
     def login(self, email, password):
-        self.goTo('http://vimeo.com/log_in')
-        self.logger.info("Logging in as %s...", email)
-        try:
-            self.getElement('#email').send_keys(email)
-            self.getElement('#password').send_keys(password)
-            self.getElement('#login_form input[type=submit]').click()
-            self.getElement('#menu .me a').click()
-            sleep(1) # prevents occasional login fails
-            self.loggedIn = True
-        except NoSuchElementException, e:
-            self.logger.error("Login failed: %s", e.msg)
-            self.errors += 1
+        for _ in xrange(self.retryCount):
+            self.goTo('http://vimeo.com/log_in')
+            self.logger.info("Logging in as %s...", email)
+            try:
+                self.getElement('#email').send_keys(email)
+                self.getElement('#password').send_keys(password)
+                self.getElement('#login_form input[type=submit]').click()
+                self.getElement('#menu .me a').click()
+                sleep(1) # prevents occasional login fails
+                self.loggedIn = True
+                return
+            except NoSuchElementException, e:
+                self.logger.error("Login failed: %s", e.msg)
+        self.errors += 1
 
     def getItemsFromPage(self):
         self.logger.info("Processing %s", self.driver.current_url)
@@ -422,134 +424,126 @@ class VimeoDownloader(object):
             self.getItemsFromURL(item, target)
 
     def processVideo(self, vID, number):
-        title = ''
-        download = None
-        # Parse video page
-        for i in count():
-            try:
-                self.goTo(vID)
-                title = encodeForConsole(self.getElement('h1[itemprop=name]').text.strip().rstrip('.'))
-                self.driver.find_element_by_class_name('iconify_down_b').click()
-                download = self.getElement('#download')
-                break
-            except NoSuchElementException, e:
-                self.logger.warning(e.msg)
-                if i >= self.retryCount:
-                    self.logger.error("Page load failed")
-                    self.errors += 1
-                    break
-        # Parse download links
-        link = linkSize = localSize = downloadOK = None
-        if download:
-            for preference in FILE_PREFERENCES:
+        for _attempt in xrange(self.retryCount):
+            title = ''
+            download = None
+            for i in count():
                 try:
-                    link = download.find_element_by_partial_link_text(preference)
+                    self.goTo(vID)
+                    title = encodeForConsole(self.getElement('h1[itemprop=name]').text.strip().rstrip('.'))
+                    self.driver.find_element_by_class_name('iconify_down_b').click()
+                    download = self.getElement('#download')
                     break
-                except NoSuchElementException:
-                    pass
-        if link: # Parse chosen download link
-            userAgent = str(self.driver.execute_script('return window.navigator.userAgent'))
-            cookies = self.driver.get_cookies()
-            tokens = link.text.split() # unicode
-            extension = tokens[1].strip('.') # unicode
-            description = encodeForConsole('%s/%s' % (tokens[0], extension.upper()))
-            link = str(link.get_attribute('href'))
-            if self.getFileSizes:
-                try:
-                    request = requests.get(link, stream = True, headers = { 'user-agent': userAgent }, cookies = dict((str(cookie['name']), str(cookie['value'])) for cookie in cookies))
-                    request.close()
-                    linkSize = int(request.headers['content-length'])
-                    self.totalFileSize += linkSize
-                    description += ', %s' % readableSize(linkSize)
-                except Exception, e:
-                    self.logger.warning(e)
-        else:
-            description = extension = 'NONE'
-        # Prepare file information
-        prefix = ' '.join((title, '(%s)' % description))
-        suffix = ' '.join((('%d/%d %d%%' % (number, len(self.vIDs), int(number * 100.0 / len(self.vIDs)))),)
-                        + ((readableSize(self.totalFileSize),) if self.totalFileSize else ()))
-        self.logger.info(' '.join((prefix, suffix)))
-        fileName = cleanupFileName('%s.%s' % (' '.join(((title.decode(CONSOLE_ENCODING),) if title else ()) + (str(vID),)), extension.lower())) # unicode
-        targetFileName = encodeForFileSystem(join(self.targetDirectory, fileName))
-        if link: # Downloading file
-            if linkSize:
-                localSize = getFileSize(targetFileName)
-                if localSize == linkSize:
-                    downloadOK = True
-                elif localSize > linkSize:
-                    self.errors += 1
-                    self.logger.error("Local file larger (%d) than remote file (%d), removing", localSize, linkSize)
-                    remove(targetFileName)
-                    localSize = None
-            if not downloadOK:
-                class ProgressIndicator(object):
-                    QUANTUM = 10 * 1024 * 1024 # 10 megabytes
-                    ACTION = '--//--\\\\' # update() gets called in pairs, this smoothes things up
-                    action = len(ACTION) - 1
+                except NoSuchElementException, e:
+                    self.logger.warning(e.msg)
+                    if i >= self.retryCount:
+                        self.logger.error("Page load failed")
+                        self.errors += 1
+                        break
+            # Parse download links
+            link = linkSize = localSize = downloadOK = None
+            if download:
+                for preference in FILE_PREFERENCES:
+                    try:
+                        link = download.find_element_by_partial_link_text(preference)
+                        break
+                    except NoSuchElementException:
+                        pass
+            if link: # Parse chosen download link
+                userAgent = str(self.driver.execute_script('return window.navigator.userAgent'))
+                cookies = self.driver.get_cookies()
+                tokens = link.text.split() # unicode
+                extension = tokens[1].strip('.') # unicode
+                description = encodeForConsole('%s/%s' % (tokens[0], extension.upper()))
+                link = str(link.get_attribute('href'))
+                if self.getFileSizes:
+                    try:
+                        request = requests.get(link, stream = True, headers = { 'user-agent': userAgent }, cookies = dict((str(cookie['name']), str(cookie['value'])) for cookie in cookies))
+                        request.close()
+                        linkSize = int(request.headers['content-length'])
+                        self.totalFileSize += linkSize
+                        description += ', %s' % readableSize(linkSize)
+                    except Exception, e:
+                        self.logger.warning(e)
+            else:
+                description = extension = 'NONE'
+            # Prepare file information
+            prefix = ' '.join((title, '(%s)' % description))
+            suffix = ' '.join((('%d/%d %d%%' % (number, len(self.vIDs), int(number * 100.0 / len(self.vIDs)))),)
+                            + ((readableSize(self.totalFileSize),) if self.totalFileSize else ()))
+            self.logger.info(' '.join((prefix, suffix)))
+            fileName = cleanupFileName('%s.%s' % (' '.join(((title.decode(CONSOLE_ENCODING),) if title else ()) + (str(vID),)), extension.lower())) # unicode
+            targetFileName = encodeForFileSystem(join(self.targetDirectory, fileName))
+            if link: # Downloading file
+                if linkSize:
+                    localSize = getFileSize(targetFileName)
+                    if localSize == linkSize:
+                        downloadOK = True
+                    elif localSize > linkSize:
+                        self.errors += 1
+                        self.logger.error("Local file larger (%d) than remote file (%d), removing", localSize, linkSize)
+                        remove(targetFileName)
+                        localSize = None
+                if not downloadOK:
+                    class ProgressIndicator(object):
+                        QUANTUM = 10 * 1024 * 1024 # 10 megabytes
+                        ACTION = '--//--\\\\' # update() gets called in pairs, this smoothes things up
+                        action = len(ACTION) - 1
 
-                    def progress(self, s, suffix = ''):
-                        self.action = (self.action + 1) % len(self.ACTION)
-                        stdout.write('\b%s%s' % (s, suffix + '\n' if suffix else self.ACTION[self.action]))
+                        def progress(self, s, suffix = ''):
+                            self.action = (self.action + 1) % len(self.ACTION)
+                            stdout.write('\b%s%s' % (s, suffix + '\n' if suffix else self.ACTION[self.action]))
 
-                    def start(self, *_args, **kwargs):
-                        self.length = kwargs.get('length') or kwargs.get('size')
-                        self.started = False
-                        self.count = 0
-                        self.action = len(self.ACTION) - 1
-                        self.progress("Dowloading: ")
+                        def start(self, *_args, **kwargs):
+                            self.length = kwargs.get('length') or kwargs.get('size')
+                            self.started = False
+                            self.count = 0
+                            self.action = len(self.ACTION) - 1
+                            self.progress("Dowloading: ")
 
-                    def update(self, totalRead, suffix = ''):
-                        if totalRead == 0:
+                        def update(self, totalRead, suffix = ''):
+                            if totalRead == 0:
+                                self.started = True
+                            oldCount = self.count
+                            self.count = int(totalRead // self.QUANTUM) + 1
+                            self.progress(('=' if self.started else '+') * (self.count - oldCount), suffix)
                             self.started = True
-                        oldCount = self.count
-                        self.count = int(totalRead // self.QUANTUM) + 1
-                        self.progress(('=' if self.started else '+') * (self.count - oldCount), suffix)
-                        self.started = True
 
-                    def end(self, totalRead):
-                        self.update(totalRead, 'OK')
+                        def end(self, totalRead):
+                            self.update(totalRead, 'OK')
 
-                    def interrupt(self, _callback):
-                        self.progress('I')
-
-                    def retry(self, _callback):
-                        self.progress('R')
-
-                    def fail(self):
-                        self.progress('', 'F')
-
-                progressIndicator = ProgressIndicator()
-                grabber = URLGrabber(reget = 'simple', timeout = self.timeout, retry = self.retryCount,
-                    user_agent = userAgent, http_headers = tuple((str(cookie['name']), str(cookie['value'])) for cookie in cookies),
-                    progress_obj = progressIndicator, failure_callback = progressIndicator.retry, interrupt_callback = progressIndicator.interrupt)
-                for i in xrange(self.retryCount + 1):
+                    progressIndicator = ProgressIndicator()
+                    grabber = URLGrabber(reget = 'simple', timeout = self.timeout, progress_obj = progressIndicator,
+                        user_agent = userAgent, http_headers = tuple((str(cookie['name']), str(cookie['value'])) for cookie in cookies))
                     try:
                         grabber.urlgrab(link, filename = targetFileName)
                         downloadOK = True
-                        break
                     except URLGrabError, e:
-                        if i >= self.retryCount:
-                            self.errors += 1
-                            progressIndicator.fail()
-                            self.logger.error("Download failed: %s", e)
-                if downloadOK:
-                    localSize = getFileSize(targetFileName)
-                    if not localSize:
                         self.errors += 1
-                        downloadOK = False
-                        self.logger.error("Downloaded file seems corrupt")
-                    elif linkSize:
-                        if localSize > linkSize:
+                        self.logger.error("Download failed: %s", e)
+                    except KeyboardInterrupt:
+                        self.errors += 1
+                        self.logger.error("Download interrupted")
+                    if downloadOK:
+                        localSize = getFileSize(targetFileName)
+                        if not localSize:
                             self.errors += 1
                             downloadOK = False
-                            self.logger.error("Downloaded file larger (%d) than remote file (%d)", localSize, linkSize)
-                        elif localSize < linkSize:
-                            self.errors += 1
-                            downloadOK = False
-                            self.logger.error("Downloaded file smaller (%d) than remote file (%d)", localSize, linkSize)
-            if downloadOK:
-                self.logger.info("OK")
+                            self.logger.error("Downloaded file seems corrupt")
+                        elif linkSize:
+                            if localSize > linkSize:
+                                self.errors += 1
+                                downloadOK = False
+                                self.logger.error("Downloaded file larger (%d) than remote file (%d)", localSize, linkSize)
+                            elif localSize < linkSize:
+                                self.errors += 1
+                                downloadOK = False
+                                self.logger.error("Downloaded file smaller (%d) than remote file (%d)", localSize, linkSize)
+                if downloadOK:
+                    self.logger.info("OK")
+                    break
+        else:
+            self.logger.info("Download ultimately failed after %d retries", self.retryCount)
         # Creating symbolic links, if enabled
         for dirName in (dirName for (dirName, vIDs) in self.folders if vID in vIDs):
             linkFileName = join(dirName, fileName) # unicode
