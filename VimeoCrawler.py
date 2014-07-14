@@ -3,10 +3,10 @@ from getopt import getopt
 from itertools import count
 from logging import getLogger, Formatter, FileHandler, StreamHandler, DEBUG, INFO, WARNING
 from re import match
-from os import fdopen, makedirs, remove
-from os.path import getsize, isdir, join, lexists
+from os import fdopen, listdir, makedirs, remove
+from os.path import getsize, isdir, isfile, join, lexists
 from sys import argv, exit, getfilesystemencoding, platform, stdout # pylint: disable=W0622
-from time import sleep
+from time import sleep, time
 from traceback import format_exc
 
 stdout = fdopen(stdout.fileno(), 'w', 0)
@@ -61,7 +61,7 @@ except ImportError:
 
 isWindows = platform.lower().startswith('win')
 
-TITLE = 'VimeoCrawler v1.42 (c) 2013-2014 Vasily Zakharov vmzakhar@gmail.com'
+TITLE = 'VimeoCrawler v1.5 (c) 2013-2014 Vasily Zakharov vmzakhar@gmail.com'
 
 OPTION_NAMES = ('login', 'max-items', 'timeout', 'retries', 'directory', 'webdriver')
 FIELD_NAMES = ('credentials', 'maxItems', 'timeout', 'retryCount', 'targetDirectory', 'driverName')
@@ -485,9 +485,10 @@ class VimeoDownloader(object):
                         remove(targetFileName)
                         localSize = None
                 if not downloadOK:
+                    timeout = self.timeout
                     class ProgressIndicator(object):
                         QUANTUM = 10 * 1024 * 1024 # 10 megabytes
-                        ACTION = '--//--\\\\' # update() gets called in pairs, this smoothes things up
+                        ACTION = r'--\\||//' # update() often gets called in pairs, this smoothes things up
                         action = len(ACTION) - 1
 
                         def progress(self, s, suffix = ''):
@@ -497,6 +498,8 @@ class VimeoDownloader(object):
                         def start(self, *_args, **kwargs):
                             self.length = kwargs.get('length') or kwargs.get('size')
                             self.started = False
+                            self.totalRead = 0
+                            self.lastData = time()
                             self.count = 0
                             self.action = len(self.ACTION) - 1
                             self.progress("Dowloading: ")
@@ -504,9 +507,15 @@ class VimeoDownloader(object):
                         def update(self, totalRead, suffix = ''):
                             if totalRead == 0:
                                 self.started = True
+                            elif totalRead <= self.totalRead:
+                                if time() > self.lastData + timeout:
+                                    raise URLGrabError("Download seems stalled")
+                            else:
+                                self.totalRead = totalRead
+                                self.lastData = time()
                             oldCount = self.count
                             self.count = int(totalRead // self.QUANTUM) + 1
-                            self.progress(('=' if self.started else '+') * (self.count - oldCount), suffix)
+                            self.progress(('=' if self.started else '+') * max(0, self.count - oldCount), suffix)
                             self.started = True
 
                         def end(self, totalRead):
@@ -558,6 +567,26 @@ class VimeoDownloader(object):
                 self.logger.warning("Can't create link at %s: %s", encodeForConsole(linkFileName), e)
                 self.errors += 1
 
+    def removeDuplicates(self):
+        self.logger.info("Checking for duplicate files...")
+        files = {}
+        for fileName in listdir(unicode(self.targetDirectory)):
+            if '.' not in fileName:
+                continue
+            fullName = join(self.targetDirectory, fileName)
+            if not isfile(fullName):
+                continue
+            keyName = fileName[:fileName.rfind('.')]
+            files[keyName] = files.get(keyName, []) + [(fileName, fullName),]
+        for (keyName, fullNames) in files.iteritems():
+            assert fullNames
+            if len(fullNames) == 1:
+                continue
+            for (fileName, fullName) in sorted(fullNames, key = lambda (fileName, fullName): getsize(fullName))[:-1]:
+                self.logger.info("Removing duplicate %s", encodeForConsole(fileName))
+                remove(fullName)
+        self.logger.info("Done")
+
     def run(self):
         self.doCreateFolders = False
         self.loggedIn = False
@@ -589,6 +618,7 @@ class VimeoDownloader(object):
             if self.driver:
                 self.driver.close()
         self.logger.info("Crawling completed" + (' with %d errors' % self.errors if self.errors else ''))
+        self.removeDuplicates()
         return self.errors
 
 def main(args):
