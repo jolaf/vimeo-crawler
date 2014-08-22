@@ -61,7 +61,7 @@ except ImportError:
 
 isWindows = platform.lower().startswith('win')
 
-TITLE = 'VimeoCrawler v1.5 (c) 2013-2014 Vasily Zakharov vmzakhar@gmail.com'
+TITLE = 'VimeoCrawler v1.51 (c) 2013-2014 Vasily Zakharov vmzakhar@gmail.com'
 
 OPTION_NAMES = ('login', 'max-items', 'timeout', 'retries', 'directory', 'webdriver')
 FIELD_NAMES = ('credentials', 'maxItems', 'timeout', 'retryCount', 'targetDirectory', 'driverName')
@@ -132,7 +132,7 @@ def readableSize(size):
         fSize = '%.0f' % size
     return '%s %s' % (fSize, unit) # pylint: disable=W0631
 
-INVALID_FILENAME_CHARS = ':/\\\'"?*' # for file names, to be replaced with _
+INVALID_FILENAME_CHARS = '<>:"/\\|?*\'' # for file names, to be replaced with _
 def cleanupFileName(fileName):
     return ''.join('_' if c in INVALID_FILENAME_CHARS else c for c in fileName)
 
