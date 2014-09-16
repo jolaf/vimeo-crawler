@@ -13,13 +13,13 @@ stdout = fdopen(stdout.fileno(), 'w', 0)
 
 try: # Selenium configuration
     import selenium
-    if selenium.__version__.split('.') < ['2', '42', '1']:
-        raise ImportError('Selenium version %s < 2.42.1' % selenium.__version__)
+    if selenium.__version__.split('.') < ['2', '43']:
+        raise ImportError('Selenium version %s < 2.43' % selenium.__version__)
     from selenium import webdriver
     from selenium.common.exceptions import NoSuchElementException
     DRIVERS = dict((v.lower(), (v, getattr(webdriver, v))) for v in vars(webdriver) if v[0].isupper()) # ToDo: Make this list more precise
 except ImportError, ex:
-    print "%s: %s\nERROR: This software requires Selenium.\nPlease install Selenium v2.42.1 or later: https://pypi.python.org/pypi/selenium\n" % (ex.__class__.__name__, ex)
+    print "%s: %s\nERROR: This software requires Selenium.\nPlease install Selenium v2.43 or later: https://pypi.python.org/pypi/selenium\n" % (ex.__class__.__name__, ex)
     exit(-1)
 
 try: # pycurl downloader library
@@ -61,7 +61,7 @@ except ImportError:
 
 isWindows = platform.lower().startswith('win')
 
-TITLE = 'VimeoCrawler v1.51 (c) 2013-2014 Vasily Zakharov vmzakhar@gmail.com'
+TITLE = 'VimeoCrawler v1.52 (c) 2013-2014 Vasily Zakharov vmzakhar@gmail.com'
 
 OPTION_NAMES = ('login', 'max-items', 'timeout', 'retries', 'directory', 'webdriver')
 FIELD_NAMES = ('credentials', 'maxItems', 'timeout', 'retryCount', 'targetDirectory', 'driverName')
