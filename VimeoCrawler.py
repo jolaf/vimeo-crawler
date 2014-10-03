@@ -46,22 +46,24 @@ except ImportError, ex:
     print "%s: %s\nWARNING: Video size information will not be available.\nPlease install Requests v2.3.0 or later: https://pypi.python.org/pypi/requests\n" % (ex.__class__.__name__, ex)
 
 try: # Filesystem symbolic links configuration
-    from os import symlink # UNIX # pylint: disable=E0611
+    from os import link as hardlink, symlink # UNIX # pylint: disable=E0611, W0611
 except ImportError:
-    global symlink # pylint: disable=W0604
     try:
         from ctypes import windll
         dll = windll.LoadLibrary('kernel32.dll')
+        def hardlink(source, linkName):
+            if not dll.CreateHardLinkW(linkName, source, None):
+                raise OSError("code %d" % dll.GetLastError())
         def symlink(source, linkName):
             if not dll.CreateSymbolicLinkW(linkName, source, 0):
                 raise OSError("code %d" % dll.GetLastError())
     except Exception, ex:
-        symlink = None
+        hardlink = symlink = None
         print "%s: %s\nWARNING: Filesystem links will not be available.\nPlease run on UNIX or Windows Vista or later.\n" % (ex.__class__.__name__, ex)
 
 isWindows = platform.lower().startswith('win')
 
-TITLE = 'VimeoCrawler v1.52 (c) 2013-2014 Vasily Zakharov vmzakhar@gmail.com'
+TITLE = 'VimeoCrawler v1.53 (c) 2013-2014 Vasily Zakharov vmzakhar@gmail.com'
 
 OPTION_NAMES = ('login', 'max-items', 'timeout', 'retries', 'directory', 'webdriver')
 FIELD_NAMES = ('credentials', 'maxItems', 'timeout', 'retryCount', 'targetDirectory', 'driverName')
@@ -412,7 +414,7 @@ class VimeoDownloader(object):
                     if self.doCreateFolders:
                         dirName = self.createDir(cleanupFileName(title.strip().rstrip('.'))) # unicode
                         url.createFile(dirName)
-                        if symlink:
+                        if hardlink:
                             target = set()
                             self.folders.append((dirName, target))
                     items = self.getItemsFromFolder()
@@ -508,7 +510,7 @@ class VimeoDownloader(object):
                             if totalRead == 0:
                                 self.started = True
                             elif totalRead <= self.totalRead:
-                                if time() > self.lastData + timeout:
+                                if time() > self.lastData + timeout: # pylint: disable=W0640
                                     raise URLGrabError("Download seems stalled")
                             else:
                                 self.totalRead = totalRead
@@ -562,7 +564,7 @@ class VimeoDownloader(object):
             except:
                 pass
             try:
-                symlink(join('..', fileName), linkFileName)
+                hardlink(join(self.targetDirectory, fileName), linkFileName)
             except Exception, e:
                 self.logger.warning("Can't create link at %s: %s", encodeForConsole(linkFileName), e)
                 self.errors += 1
