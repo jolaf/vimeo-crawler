@@ -63,7 +63,7 @@ except ImportError:
 
 isWindows = platform.lower().startswith('win')
 
-TITLE = 'VimeoCrawler v1.53 (c) 2013-2014 Vasily Zakharov vmzakhar@gmail.com'
+TITLE = 'VimeoCrawler v1.54 (c) 2013-2014 Vasily Zakharov vmzakhar@gmail.com'
 
 OPTION_NAMES = ('login', 'max-items', 'timeout', 'retries', 'directory', 'webdriver')
 FIELD_NAMES = ('credentials', 'maxItems', 'timeout', 'retryCount', 'targetDirectory', 'driverName')
@@ -337,7 +337,7 @@ class VimeoDownloader(object):
         self.logger.info("Processing %s", self.driver.current_url)
         try:
             links = self.driver.find_elements_by_css_selector('#browse_content .browse a')
-            links = tuple(link.get_attribute('href') for link in links)
+            links = (link.get_attribute('href') for link in links)
             items = tuple(URL(link) for link in links if VIMEO in link and not link.endswith('settings'))[:self.maxItems]
         except NoSuchElementException, e:
             self.logger.error(e.msg)
@@ -611,7 +611,7 @@ class VimeoDownloader(object):
                 self.logger.info("Processing %d videos...", len(self.vIDs))
                 if self.getFileSizes:
                     requests.adapters.DEFAULT_RETRIES = self.retryCount
-                for (n, vID) in enumerate(self.vIDs, 1):
+                for (n, vID) in enumerate(sorted(self.vIDs, reverse = True), 1):
                     self.processVideo(vID, n)
         except Exception, e:
             self.logger.error(format_exc() if self.verbose else e)
