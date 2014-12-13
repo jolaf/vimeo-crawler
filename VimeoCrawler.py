@@ -63,12 +63,12 @@ except ImportError:
 
 isWindows = platform.lower().startswith('win')
 
-TITLE = 'VimeoCrawler v1.54 (c) 2013-2014 Vasily Zakharov vmzakhar@gmail.com'
+TITLE = 'VimeoCrawler v1.6 (c) 2013-2014 Vasily Zakharov vmzakhar@gmail.com'
 
 OPTION_NAMES = ('login', 'max-items', 'timeout', 'retries', 'directory', 'webdriver')
 FIELD_NAMES = ('credentials', 'maxItems', 'timeout', 'retryCount', 'targetDirectory', 'driverName')
 SHORT_OPTIONS = ''.join(('%c:' % option[0]) for option in OPTION_NAMES) + 'fhsv'
-LONG_OPTIONS = tuple(('%s=' % option) for option in OPTION_NAMES) + ('no-folders', 'help', 'no-sizes', 'verbose')
+LONG_OPTIONS = tuple(('%s=' % option) for option in OPTION_NAMES) + ('no-folders', 'hard-links', 'help', 'no-sizes', 'verbose')
 
 USAGE_INFO = '''Usage: python VimeoCrawler.py [options] [start URL or video ID]
 
@@ -86,6 +86,7 @@ Options:
 -h --help - Displays this help message.
 -v --verbose - Provide verbose logging.
 -f --no-folders - Do not create subfolders with links for channels and albums.
+   --hard-links - Use hard links instead of symbolic links in subfolders.
 -s --no-sizes - Do not get file sizes for videos (speeds up crawling a bit).
 
 -l --login - Vimeo login credentials, formatted as email:password.
@@ -230,6 +231,8 @@ class VimeoDownloader(object):
                     self.verbose = True
                 elif option in ('-f', '--no-folders'):
                     self.foldersNeeded = False
+                elif option in ('--hard-links',):
+                    self.hardLinks = True
                 elif option in ('-s', '--no-filesize'):
                     self.getFileSizes = False
                 else: # Parsing options with arguments
@@ -414,7 +417,7 @@ class VimeoDownloader(object):
                     if self.doCreateFolders:
                         dirName = self.createDir(cleanupFileName(title.strip().rstrip('.'))) # unicode
                         url.createFile(dirName)
-                        if hardlink:
+                        if symlink:
                             target = set()
                             self.folders.append((dirName, target))
                     items = self.getItemsFromFolder()
@@ -455,7 +458,7 @@ class VimeoDownloader(object):
                 userAgent = str(self.driver.execute_script('return window.navigator.userAgent'))
                 cookies = self.driver.get_cookies()
                 tokens = link.text.split() # unicode
-                extension = tokens[1].strip('.') # unicode
+                extension = tokens[1].strip('.') if len(tokens) > 1 else link.get_attribute('download').split('.')[-1] # unicode
                 description = encodeForConsole('%s/%s' % (tokens[0], extension.upper()))
                 link = str(link.get_attribute('href'))
                 if self.getFileSizes:
@@ -564,7 +567,7 @@ class VimeoDownloader(object):
             except:
                 pass
             try:
-                hardlink(join(self.targetDirectory, fileName), linkFileName)
+                (hardlink if self.hardLinks else symlink)(join(self.targetDirectory, fileName), linkFileName)
             except Exception, e:
                 self.logger.warning("Can't create link at %s: %s", encodeForConsole(linkFileName), e)
                 self.errors += 1
