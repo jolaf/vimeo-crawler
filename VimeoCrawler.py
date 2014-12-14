@@ -63,12 +63,12 @@ except ImportError:
 
 isWindows = platform.lower().startswith('win')
 
-TITLE = 'VimeoCrawler v1.6 (c) 2013-2014 Vasily Zakharov vmzakhar@gmail.com'
+TITLE = 'VimeoCrawler v1.7 (c) 2013-2014 Vasily Zakharov vmzakhar@gmail.com'
 
-OPTION_NAMES = ('login', 'max-items', 'timeout', 'retries', 'directory', 'webdriver')
-FIELD_NAMES = ('credentials', 'maxItems', 'timeout', 'retryCount', 'targetDirectory', 'driverName')
-SHORT_OPTIONS = ''.join(('%c:' % option[0]) for option in OPTION_NAMES) + 'fhsv'
-LONG_OPTIONS = tuple(('%s=' % option) for option in OPTION_NAMES) + ('no-folders', 'hard-links', 'help', 'no-sizes', 'verbose')
+OPTION_NAMES = ('directory', 'login', 'max-items', 'retries', 'set-language', 'timeout', 'webdriver')
+FIELD_NAMES = ('targetDirectory', 'credentials', 'maxItems', 'retryCount', 'setLanguage', 'timeout', 'driverName')
+SHORT_OPTIONS = ''.join(('%c:' % option[0]) for option in OPTION_NAMES) + 'hvnfz'
+LONG_OPTIONS = tuple(('%s=' % option) for option in OPTION_NAMES) + ('help', 'verbose', 'no-download', 'no-folders', 'no-filesize', 'hard-links')
 
 USAGE_INFO = '''Usage: python VimeoCrawler.py [options] [start URL or video ID]
 
@@ -85,19 +85,21 @@ In default configuration, the program requires Mozilla Firefox.
 Options:
 -h --help - Displays this help message.
 -v --verbose - Provide verbose logging.
+-n --no-download - Crawl only, do not download anything.
 -f --no-folders - Do not create subfolders with links for channels and albums.
+-z --no-filesize - Do not get file sizes for videos (speeds up crawling a bit).
    --hard-links - Use hard links instead of symbolic links in subfolders.
--s --no-sizes - Do not get file sizes for videos (speeds up crawling a bit).
 
 -l --login - Vimeo login credentials, formatted as email:password.
 -d --directory - Target directory to save all the output files to,
-              default is the current directory.
+                 default is the current directory.
 
 -w --webdriver - Selenium WebDriver to use for crawling, default is Firefox.
--t -- timeout - Download attempt timeout, default is 60 seconds.
+-t --timeout - Download attempt timeout, default is 60 seconds.
 -r --retries - Number of page download retry attempts, default is 3.
 -m --max-items - Maximum number of items (videos or folders) to retrieve
                  from one page (usable for testing), default is none.
+-s --set-language - Try to set the specified language on all crawled videos.
 
 If start URL is not specified, the login credentials have to be specified.
 In that case, the whole account for those credentials would be crawled.
@@ -202,22 +204,25 @@ class URL(object):
     def __cmp__(self, other):
         return 1 if self.url > other.url else -1 if self.url < other.url else 0
 
-class VimeoDownloader(object):
+class VimeoCrawler(object):
     def __init__(self, args):
         # Simple options
-        self.go = False
         self.verbose = False
+        self.doDownload = True
         self.foldersNeeded = True
         self.getFileSizes = bool(requests)
-        # Options with arguments
+        self.useHardLinks = False
+        # Selenium WebDriver settings
         self.driver = None
         self.driverName = 'Firefox'
         self.driverClass = None
+        # Options with parameters
         self.credentials = None
-        self.maxItems = None
+        self.targetDirectory = ''
         self.timeout = 60
         self.retryCount = 3
-        self.targetDirectory = ''
+        self.maxItems = None
+        self.setLanguage = None
         self.startURL = None
         try:
             # Reading command line options
@@ -225,16 +230,16 @@ class VimeoDownloader(object):
             for (option, value) in options:
                 if option in ('-h', '--help'):
                     usage()
-                elif option in ('-g', '--go'):
-                    self.go = True
                 elif option in ('-v', '--verbose'):
                     self.verbose = True
+                elif option in ('-n', '--no-download'):
+                    self.doDownload = False
                 elif option in ('-f', '--no-folders'):
                     self.foldersNeeded = False
-                elif option in ('--hard-links',):
-                    self.hardLinks = True
-                elif option in ('-s', '--no-filesize'):
+                elif option in ('-z', '--no-filesize'):
                     self.getFileSizes = False
+                elif option in ('--hard-links',):
+                    self.useHardLinks = True
                 else: # Parsing options with arguments
                     index = None
                     for (maskNum, mask) in enumerate(('-([^-])', '--(.*)')):
@@ -277,6 +282,8 @@ class VimeoDownloader(object):
                     raise ValueError
             except ValueError:
                 raise ValueError("-r / --retries parameter must be a non-negative integer")
+            if self.setLanguage:
+                self.setLanguage = self.setLanguage.capitalize()
             if len(parameters) > 1:
                 raise Exception("Too many parameters")
             if parameters:
@@ -446,7 +453,7 @@ class VimeoDownloader(object):
                         self.errors += 1
                         break
             # Parse download links
-            link = linkSize = localSize = downloadOK = None
+            link = linkSize = localSize = downloadOK = downloadSkip = None
             if download:
                 for preference in FILE_PREFERENCES:
                     try:
@@ -457,9 +464,8 @@ class VimeoDownloader(object):
             if link: # Parse chosen download link
                 userAgent = str(self.driver.execute_script('return window.navigator.userAgent'))
                 cookies = self.driver.get_cookies()
-                tokens = link.text.split() # unicode
-                extension = tokens[1].strip('.') if len(tokens) > 1 else link.get_attribute('download').split('.')[-1] # unicode
-                description = encodeForConsole('%s/%s' % (tokens[0], extension.upper()))
+                extension = link.get_attribute('download').split('.')[-1] # unicode
+                description = encodeForConsole('%s/%s' % (link.text, extension.upper()))
                 link = str(link.get_attribute('href'))
                 if self.getFileSizes:
                     try:
@@ -479,6 +485,26 @@ class VimeoDownloader(object):
             self.logger.info(' '.join((prefix, suffix)))
             fileName = cleanupFileName('%s.%s' % (' '.join(((title.decode(CONSOLE_ENCODING),) if title else ()) + (str(vID),)), extension.lower())) # unicode
             targetFileName = encodeForFileSystem(join(self.targetDirectory, fileName))
+            if self.setLanguage:
+                try:
+                    self.driver.find_element_by_id('change_settings').click()
+                    languages = self.driver.find_elements_by_css_selector('select[name=language] option')
+                    currentLanguage = ([l for l in languages if l.is_selected()] or [None,])[0]
+                    if currentLanguage is None or currentLanguage is languages[0]:
+                        ls = [l for l in languages if l.text.capitalize().startswith(self.setLanguage)]
+                        if len(ls) != 1:
+                            ls = [l for l in languages if l.get_attribute('value').capitalize().startswith(self.setLanguage)]
+                        if len(ls) == 1:
+                            self.logger.info("Language not set, setting to %s", ls[0].text)
+                            ls[0].click()
+                            self.driver.find_element_by_css_selector('#settings_form input[type=submit]').click()
+                        else:
+                            self.logger.error("Unsupported language: %s", self.setLanguage)
+                            self.setLanguage = None
+                    else:
+                        self.logger.info("Language already set to %s / %s", currentLanguage.get_attribute('value').upper(), currentLanguage.text)
+                except NoSuchElementException:
+                    self.logger.warning("Failed to set language to %s, settings not available", self.setLanguage)
             if link: # Downloading file
                 if linkSize:
                     localSize = getFileSize(targetFileName)
@@ -486,10 +512,11 @@ class VimeoDownloader(object):
                         downloadOK = True
                     elif localSize > linkSize:
                         self.errors += 1
-                        self.logger.error("Local file larger (%d) than remote file (%d), removing", localSize, linkSize)
-                        remove(targetFileName)
-                        localSize = None
-                if not downloadOK:
+                        self.logger.error("Local file is larger (%d) than remote file (%d)", localSize, linkSize)
+                        downloadSkip = True
+                        #remove(targetFileName)
+                        #localSize = None
+                if self.doDownload and not downloadOK:
                     timeout = self.timeout
                     class ProgressIndicator(object):
                         QUANTUM = 10 * 1024 * 1024 # 10 megabytes
@@ -556,6 +583,9 @@ class VimeoDownloader(object):
                 if downloadOK:
                     self.logger.info("OK")
                     break
+                elif downloadSkip or not self.doDownload:
+                    self.logger.info("Downloading SKIPPED")
+                    break
         else:
             self.logger.info("Download ultimately failed after %d retries", self.retryCount)
         # Creating symbolic links, if enabled
@@ -567,7 +597,7 @@ class VimeoDownloader(object):
             except:
                 pass
             try:
-                (hardlink if self.hardLinks else symlink)(join(self.targetDirectory, fileName), linkFileName)
+                (hardlink if self.useHardLinks else symlink)(join('..', fileName), linkFileName)
             except Exception, e:
                 self.logger.warning("Can't create link at %s: %s", encodeForConsole(linkFileName), e)
                 self.errors += 1
@@ -627,7 +657,7 @@ class VimeoDownloader(object):
         return self.errors
 
 def main(args):
-    exit(1 if VimeoDownloader(args).run() else 0)
+    exit(1 if VimeoCrawler(args).run() else 0)
 
 if __name__ == '__main__':
     main(argv[1:])
