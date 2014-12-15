@@ -9,6 +9,7 @@ from sys import argv, exit, getfilesystemencoding, platform, stdout # pylint: di
 from time import sleep, time
 from traceback import format_exc
 
+# Console output encoding and buffering problems fixing
 stdout = fdopen(stdout.fileno(), 'w', 0)
 
 try: # Selenium configuration
@@ -63,7 +64,7 @@ except ImportError:
 
 isWindows = platform.lower().startswith('win')
 
-TITLE = 'VimeoCrawler v1.7 (c) 2013-2014 Vasily Zakharov vmzakhar@gmail.com'
+TITLE = 'VimeoCrawler v1.71 (c) 2013-2014 Vasily Zakharov vmzakhar@gmail.com'
 
 OPTION_NAMES = ('directory', 'login', 'max-items', 'retries', 'set-language', 'timeout', 'webdriver')
 FIELD_NAMES = ('targetDirectory', 'credentials', 'maxItems', 'retryCount', 'setLanguage', 'timeout', 'driverName')
