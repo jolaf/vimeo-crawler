@@ -12,15 +12,17 @@ from traceback import format_exc
 # Console output encoding and buffering problems fixing
 stdout = fdopen(stdout.fileno(), 'w', 0)
 
+# ToDo: Remove old file names of the same or smaller size for the same VID
+
 try: # Selenium configuration
     import selenium
-    if selenium.__version__.split('.') < ['2', '43']:
-        raise ImportError('Selenium version %s < 2.43' % selenium.__version__)
+    if tuple(int(v) for v in selenium.__version__.split('.')) < (2, 45):
+        raise ImportError('Selenium version %s < 2.45' % selenium.__version__)
     from selenium import webdriver
     from selenium.common.exceptions import NoSuchElementException
     DRIVERS = dict((v.lower(), (v, getattr(webdriver, v))) for v in vars(webdriver) if v[0].isupper()) # ToDo: Make this list more precise
 except ImportError, ex:
-    print "%s: %s\nERROR: This software requires Selenium.\nPlease install Selenium v2.43 or later: https://pypi.python.org/pypi/selenium\n" % (ex.__class__.__name__, ex)
+    print "%s: %s\nERROR: This software requires Selenium.\nPlease install Selenium v2.45 or later: https://pypi.python.org/pypi/selenium\n" % (ex.__class__.__name__, ex)
     exit(-1)
 
 try: # pycurl downloader library
@@ -32,15 +34,18 @@ except ImportError, ex:
 try: # urlgrabber downloader library, requires pycurl
     import urlgrabber
     from urlgrabber.grabber import URLGrabber, URLGrabError
-    if urlgrabber.__version__.split('.') < ['3', '9', '1']:
-        raise ImportError('urlgrabber version %s < 3.9.1' % urlgrabber.__version__)
+    if tuple(int(v) for v in urlgrabber.__version__.split('.')) < (3, 10):
+        if tuple(int(v) for v in urlgrabber.__version__.split('.')) < (3, 9, 1):
+            raise ImportError('urlgrabber version %s < 3.9.1' % urlgrabber.__version__)
+        else:
+            print "\nWARNING: You're using urlgrabber 3.9.1 which contains a known error.\nPlease use urlgrabber 3.10 or later whenever possible,\notherwise (on Windows) patch the urlgrabber source:\nLocate the file C:\\Python27\\Lib\\site-packages\\urlgrabber\\grabber.py\nand in line 1161 replace\nself.curl_obj.setopt(pycurl.SSL_VERIFYHOST, opts.ssl_verify_host)\nwith\nself.curl_obj.setopt(pycurl.SSL_VERIFYHOST, 0)\nSee https://ask.fedoraproject.org/en/question/35874/yum-pycurl-error-43/ for details.\n"
 except ImportError, ex:
     print "%s: %s\nERROR: This software requires urlgrabber.\nPlease install urlgrabber v3.9.1 or later: https://pypi.python.org/pypi/urlgrabber\n" % (ex.__class__.__name__, ex)
     exit(-1)
 
 try: # Requests HTTP library
     import requests
-    if requests.__version__.split('.') < ['2', '3', '0']:
+    if tuple(int(v) for v in requests.__version__.split('.')) < (2, 3, 0):
         raise ImportError('Requests version %s < 2.3.0' % requests.__version__)
 except ImportError, ex:
     requests = None
@@ -64,12 +69,12 @@ except ImportError:
 
 isWindows = platform.lower().startswith('win')
 
-TITLE = 'VimeoCrawler v1.71 (c) 2013-2014 Vasily Zakharov vmzakhar@gmail.com'
+TITLE = 'VimeoCrawler v1.72 (c) 2013-2015 Vasily Zakharov vmzakhar@gmail.com'
 
-OPTION_NAMES = ('directory', 'login', 'max-items', 'retries', 'set-language', 'timeout', 'webdriver')
-FIELD_NAMES = ('targetDirectory', 'credentials', 'maxItems', 'retryCount', 'setLanguage', 'timeout', 'driverName')
+OPTION_NAMES = ('directory', 'login', 'max-items', 'retries', 'set-language', 'preset', 'timeout', 'webdriver')
+FIELD_NAMES = ('targetDirectory', 'credentials', 'maxItems', 'retryCount', 'setLanguage', 'setPreset', 'timeout', 'driverName')
 SHORT_OPTIONS = ''.join(('%c:' % option[0]) for option in OPTION_NAMES) + 'hvnfz'
-LONG_OPTIONS = tuple(('%s=' % option) for option in OPTION_NAMES) + ('help', 'verbose', 'no-download', 'no-folders', 'no-filesize', 'hard-links')
+LONG_OPTIONS = tuple(('%s=' % option) for option in OPTION_NAMES) + ('help', 'verbose', 'no-download', 'no-folders', 'no-filesize', 'hard-links', 'hd')
 
 USAGE_INFO = '''Usage: python VimeoCrawler.py [options] [start URL or video ID]
 
@@ -101,6 +106,8 @@ Options:
 -m --max-items - Maximum number of items (videos or folders) to retrieve
                  from one page (usable for testing), default is none.
 -s --set-language - Try to set the specified language on all crawled videos.
+-p --preset - Try to set the specified embed preset on all crawled videos.
+   --hd - Try to set all crawled videos to embed as HD.
 
 If start URL is not specified, the login credentials have to be specified.
 In that case, the whole account for those credentials would be crawled.
@@ -124,7 +131,7 @@ CATEGORIES_LINKS = ('albums', 'groups', 'channels') # http://vimeo.com/account/c
 VIDEOS_LINKS = ('videos') # http://vimeo.com/account/videos URLs
 FOLDERS_LINKS = ('album', 'groups', 'channels') # http://vimeo.com/folder/*
 FOLDER_NAMES = {'albums': 'album', 'groups': 'group', 'channels': 'channel'} # Mapping to singular for printing
-FILE_PREFERENCES = ('Original', 'HD', 'SD', 'Mobile', 'file') # Vimeo file versions parts
+FILE_PREFERENCES = ('Original', 'On2 HD', 'On2 SD', 'HD', 'SD', 'Mobile', 'file') # Vimeo file versions parts
 
 UNITS = ('bytes', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB')
 def readableSize(size):
@@ -213,13 +220,15 @@ class VimeoCrawler(object):
         self.foldersNeeded = True
         self.getFileSizes = bool(requests)
         self.useHardLinks = False
+        self.setPreset = False
+        self.setHD = False
         # Selenium WebDriver settings
         self.driver = None
         self.driverName = 'Firefox'
         self.driverClass = None
         # Options with parameters
         self.credentials = None
-        self.targetDirectory = ''
+        self.targetDirectory = '.'
         self.timeout = 60
         self.retryCount = 3
         self.maxItems = None
@@ -241,6 +250,8 @@ class VimeoCrawler(object):
                     self.getFileSizes = False
                 elif option in ('--hard-links',):
                     self.useHardLinks = True
+                elif option in ('--hd',):
+                    self.setHD = True
                 else: # Parsing options with arguments
                     index = None
                     for (maskNum, mask) in enumerate(('-([^-])', '--(.*)')):
@@ -292,8 +303,6 @@ class VimeoCrawler(object):
             elif not self.credentials:
                 raise ValueError("Neither login credentials nor start URL is specified")
             # Creating target directory
-            if self.targetDirectory == '.':
-                self.targetDirectory = ''
             self.createDir()
             if self.startURL:
                 self.startURL.createFile(self.targetDirectory)
@@ -443,7 +452,7 @@ class VimeoCrawler(object):
             for i in count():
                 try:
                     self.goTo(vID)
-                    title = encodeForConsole(self.getElement('h1[itemprop=name]').text.strip().rstrip('.'))
+                    title = encodeForConsole(self.getElement('#page_header h1').text.strip().rstrip('.'))
                     self.driver.find_element_by_class_name('iconify_down_b').click()
                     download = self.getElement('#download')
                     break
@@ -486,26 +495,63 @@ class VimeoCrawler(object):
             self.logger.info(' '.join((prefix, suffix)))
             fileName = cleanupFileName('%s.%s' % (' '.join(((title.decode(CONSOLE_ENCODING),) if title else ()) + (str(vID),)), extension.lower())) # unicode
             targetFileName = encodeForFileSystem(join(self.targetDirectory, fileName))
-            if self.setLanguage:
+            if self.setLanguage or self.setPreset or self.setHD:
                 try:
                     self.driver.find_element_by_id('change_settings').click()
-                    languages = self.driver.find_elements_by_css_selector('select[name=language] option')
-                    currentLanguage = ([l for l in languages if l.is_selected()] or [None,])[0]
-                    if currentLanguage is None or currentLanguage is languages[0]:
-                        ls = [l for l in languages if l.text.capitalize().startswith(self.setLanguage)]
-                        if len(ls) != 1:
-                            ls = [l for l in languages if l.get_attribute('value').capitalize().startswith(self.setLanguage)]
-                        if len(ls) == 1:
-                            self.logger.info("Language not set, setting to %s", ls[0].text)
-                            ls[0].click()
-                            self.driver.find_element_by_css_selector('#settings_form input[type=submit]').click()
-                        else:
-                            self.logger.error("Unsupported language: %s", self.setLanguage)
-                            self.setLanguage = None
-                    else:
-                        self.logger.info("Language already set to %s / %s", currentLanguage.get_attribute('value').upper(), currentLanguage.text)
+                    if self.setLanguage:
+                        try:
+                            languages = self.driver.find_elements_by_css_selector('select[name=language] option')
+                            currentLanguage = ([l for l in languages if l.is_selected()] or [None,])[0]
+                            if currentLanguage is None or currentLanguage is languages[0]:
+                                ls = [l for l in languages if l.text.capitalize().startswith(self.setLanguage)]
+                                if len(ls) != 1:
+                                    ls = [l for l in languages if l.get_attribute('value').capitalize().startswith(self.setLanguage)]
+                                if len(ls) == 1:
+                                    self.logger.info("Language not set, setting to %s", ls[0].text)
+                                    ls[0].click()
+                                    self.driver.find_element_by_css_selector('#settings_form input[type=submit]').click()
+                                else:
+                                    self.logger.error("Unsupported language: %s", self.setLanguage)
+                                    self.setLanguage = None
+                            else:
+                                self.logger.info("Language is already set to %s / %s", currentLanguage.get_attribute('value').upper(), currentLanguage.text)
+                        except NoSuchElementException:
+                            self.logger.warning("Failed to set language to %s", self.setLanguage)
+                    if self.setPreset or self.setHD:
+                        try:
+                            self.driver.find_element_by_css_selector('#tabs a[title=Embed]').click()
+                            if self.setHD:
+                                try:
+                                    checkbox = self.driver.find_element_by_css_selector('input[name=allow_hd_embed]')
+                                    if checkbox.is_selected():
+                                        self.logger.info("Embed already set to HD")
+                                    else:
+                                        self.logger.info("Setting embed to HD")
+                                        checkbox.click()
+                                        self.driver.find_element_by_css_selector('#settings_form input[name=save_embed_settings]').click()
+                                except NoSuchElementException:
+                                    self.logger.warning("Failed to set playback to HD")
+                            if self.setPreset:
+                                try:
+                                    presets = self.driver.find_elements_by_css_selector("select#preset option")
+                                    currentPreset = ([p for p in presets if p.is_selected()] or [None,])[0]
+                                    if currentPreset and currentPreset.text.capitalize() == self.setPreset:
+                                        self.logger.info("Preset is already set to %s", self.setPreset)
+                                    else:
+                                        presets = [p for p in presets if p.text.capitalize() == self.setPreset]
+                                        if presets:
+                                            self.logger.info("Preset %s, setting to %s", ('is set to %s' % currentPreset.text.capitalize()) if currentPreset else 'is not set', self.setPreset)
+                                            presets[0].click()
+                                            self.driver.find_element_by_css_selector('#settings_form input[name=save_embed_settings]').click()
+                                        else:
+                                            self.logger.error("Unknown preset: %s", self.setPreset)
+                                            self.setPreset = None
+                                except NoSuchElementException:
+                                    self.logger.warning("Failed to set preset to %s", self.setPreset)
+                        except NoSuchElementException:
+                            self.logger.warning("Failed to access Embed settings")
                 except NoSuchElementException:
-                    self.logger.warning("Failed to set language to %s, settings not available", self.setLanguage)
+                    self.logger.warning("Failed to access settings")
             if link: # Downloading file
                 if linkSize:
                     localSize = getFileSize(targetFileName)
