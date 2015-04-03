@@ -4,7 +4,8 @@ from itertools import count
 from logging import getLogger, Formatter, FileHandler, StreamHandler, DEBUG, INFO, WARNING
 from re import match
 from os import fdopen, listdir, makedirs, remove
-from os.path import getsize, isdir, isfile, join, lexists
+from os.path import getmtime, getsize, isdir, isfile, join, lexists
+from subprocess import Popen, PIPE, STDOUT
 from sys import argv, exit, getfilesystemencoding, platform, stdout # pylint: disable=W0622
 from time import sleep, time
 from traceback import format_exc
@@ -12,7 +13,11 @@ from traceback import format_exc
 # Console output encoding and buffering problems fixing
 stdout = fdopen(stdout.fileno(), 'w', 0)
 
-# ToDo: Remove old file names of the same or smaller size for the same VID
+# ToDo: Report non-mentioned videos
+# ToDo: Verify already downloaded videos
+# ToDo: Do something to Knudepunkt TV problem
+# ToDo: Check video author, report it and do not attempt settings
+# ToDo: Gather all errors to re-display in the end
 
 try: # Selenium configuration
     import selenium
@@ -69,12 +74,12 @@ except ImportError:
 
 isWindows = platform.lower().startswith('win')
 
-TITLE = 'VimeoCrawler v1.72 (c) 2013-2015 Vasily Zakharov vmzakhar@gmail.com'
+TITLE = 'VimeoCrawler v1.8 (c) 2013-2015 Vasily Zakharov vmzakhar@gmail.com'
 
 OPTION_NAMES = ('directory', 'login', 'max-items', 'retries', 'set-language', 'preset', 'timeout', 'webdriver')
 FIELD_NAMES = ('targetDirectory', 'credentials', 'maxItems', 'retryCount', 'setLanguage', 'setPreset', 'timeout', 'driverName')
-SHORT_OPTIONS = ''.join(('%c:' % option[0]) for option in OPTION_NAMES) + 'hvnfz'
-LONG_OPTIONS = tuple(('%s=' % option) for option in OPTION_NAMES) + ('help', 'verbose', 'no-download', 'no-folders', 'no-filesize', 'hard-links', 'hd')
+SHORT_OPTIONS = ''.join(('%c:' % option[0]) for option in OPTION_NAMES) + 'hvnfzc'
+LONG_OPTIONS = tuple(('%s=' % option) for option in OPTION_NAMES) + ('help', 'verbose', 'no-download', 'no-folders', 'no-filesize', 'verify-content', 'hard-links', 'hd')
 
 USAGE_INFO = '''Usage: python VimeoCrawler.py [options] [start URL or video ID]
 
@@ -108,6 +113,8 @@ Options:
 -s --set-language - Try to set the specified language on all crawled videos.
 -p --preset - Try to set the specified embed preset on all crawled videos.
    --hd - Try to set all crawled videos to embed as HD.
+-c --verify-content - Verify downloaded files to be valid video files,
+                 requires ffmpeg to be available in the path.
 
 If start URL is not specified, the login credentials have to be specified.
 In that case, the whole account for those credentials would be crawled.
@@ -222,6 +229,7 @@ class VimeoCrawler(object):
         self.useHardLinks = False
         self.setPreset = False
         self.setHD = False
+        self.verifyContent = False
         # Selenium WebDriver settings
         self.driver = None
         self.driverName = 'Firefox'
@@ -248,6 +256,8 @@ class VimeoCrawler(object):
                     self.foldersNeeded = False
                 elif option in ('-z', '--no-filesize'):
                     self.getFileSizes = False
+                elif option in ('-c', '--verify-content'):
+                    self.verifyContent = True
                 elif option in ('--hard-links',):
                     self.useHardLinks = True
                 elif option in ('--hd',):
@@ -320,6 +330,14 @@ class VimeoCrawler(object):
             self.logger = getLogger('vimeo')
             self.logger.setLevel(DEBUG if self.verbose else INFO)
             self.logger.info(TITLE)
+            if self.verifyContent:
+                self.logger.info("Enabling content verification, checking for ffmpeg...")
+                subprocess = Popen('ffmpeg', shell = True, stdout = PIPE, stderr = STDOUT)
+                if subprocess.returncode:
+                    self.logger.error("FAILED (code %d), content verification NOT enabled", subprocess.returncode)
+                    self.verifyContent = False
+                else:
+                    self.logger.info("OK")
         except Exception, e:
             usage("ERROR: %s\n" % e)
 
@@ -517,12 +535,41 @@ class VimeoCrawler(object):
                                 self.logger.info("Language is already set to %s / %s", currentLanguage.get_attribute('value').upper(), currentLanguage.text)
                         except NoSuchElementException:
                             self.logger.warning("Failed to set language to %s", self.setLanguage)
+                    if self.setHD:
+                        try:
+                            self.driver.find_element_by_css_selector('#tabs a[title="Video File"]').click()
+                            try:
+                                for i in xrange(self.retryCount):
+                                    try:
+                                        radio = self.driver.find_element_by_id('hd_profile_1080')
+                                        break
+                                    except NoSuchElementException, e:
+                                        if i == self.retryCount - 1:
+                                            raise
+                                if radio.is_selected():
+                                    self.logger.info("Video already set to 1080p")
+                                elif not radio.is_enabled():
+                                    self.logger.info("Video cannot be set to 1080p")
+                                else:
+                                    self.logger.info("Setting video to 1080p")
+                                    radio.click()
+                                    self.driver.find_element_by_id('upgrade_video').click()
+                            except NoSuchElementException:
+                                self.logger.warning("Failed to set video to 1080p")
+                        except NoSuchElementException:
+                            self.logger.warning("Failed to access Video File settings")
                     if self.setPreset or self.setHD:
                         try:
                             self.driver.find_element_by_css_selector('#tabs a[title=Embed]').click()
                             if self.setHD:
                                 try:
-                                    checkbox = self.driver.find_element_by_css_selector('input[name=allow_hd_embed]')
+                                    for i in xrange(self.retryCount):
+                                        try:
+                                            checkbox = self.driver.find_element_by_css_selector('input[name=allow_hd_embed]')
+                                            break
+                                        except NoSuchElementException, e:
+                                            if i == self.retryCount - 1:
+                                                raise
                                     if checkbox.is_selected():
                                         self.logger.info("Embed already set to HD")
                                     else:
@@ -533,7 +580,13 @@ class VimeoCrawler(object):
                                     self.logger.warning("Failed to set playback to HD")
                             if self.setPreset:
                                 try:
-                                    presets = self.driver.find_elements_by_css_selector("select#preset option")
+                                    for i in xrange(self.retryCount):
+                                        try:
+                                            presets = self.driver.find_elements_by_css_selector("select#preset option")
+                                            break
+                                        except NoSuchElementException, e:
+                                            if i == self.retryCount - 1:
+                                                raise
                                     currentPreset = ([p for p in presets if p.is_selected()] or [None,])[0]
                                     if currentPreset and currentPreset.text.capitalize() == self.setPreset:
                                         self.logger.info("Preset is already set to %s", self.setPreset)
@@ -563,7 +616,7 @@ class VimeoCrawler(object):
                         downloadSkip = True
                         #remove(targetFileName)
                         #localSize = None
-                if self.doDownload and not downloadOK:
+                if self.doDownload and not downloadSkip and not downloadOK:
                     timeout = self.timeout
                     class ProgressIndicator(object):
                         QUANTUM = 10 * 1024 * 1024 # 10 megabytes
@@ -627,6 +680,14 @@ class VimeoCrawler(object):
                                 self.errors += 1
                                 downloadOK = False
                                 self.logger.error("Downloaded file smaller (%d) than remote file (%d)", localSize, linkSize)
+                            elif self.verifyContent: # Verifying downloaded file
+                                self.logger.info("Verifying...")
+                                subprocess = Popen('ffmpeg -v error -i "%s" -f null -' % targetFileName, shell = True, stdout = PIPE, stderr = STDOUT)
+                                output = subprocess.communicate()[0]
+                                if subprocess.returncode:
+                                    self.logger.warning("Verification failed, code %d", subprocess.returncode)
+                                elif output:
+                                    self.logger.error("Verification ERROR: %s", '\n'.join([s for s in output.splitlines() if "Last message repeated" not in s][-4:]))
                 if downloadOK:
                     self.logger.info("OK")
                     break
@@ -658,15 +719,15 @@ class VimeoCrawler(object):
             fullName = join(self.targetDirectory, fileName)
             if not isfile(fullName):
                 continue
-            keyName = fileName[:fileName.rfind('.')]
+            keyName = str(fileName[fileName.rfind(' ') + 1 : fileName.rfind('.')])
             files[keyName] = files.get(keyName, []) + [(fileName, fullName),]
         for (keyName, fullNames) in files.iteritems():
             assert fullNames
             if len(fullNames) == 1:
                 continue
-            for (fileName, fullName) in sorted(fullNames, key = lambda (fileName, fullName): getsize(fullName))[:-1]:
-                self.logger.info("Removing duplicate %s", encodeForConsole(fileName))
-                remove(fullName)
+            for (fileName, fullName) in sorted(fullNames, key = lambda (fileName, fullName): (getsize(fullName), getmtime(fullName)))[:-1]:
+                self.logger.info("Duplicate detected, suggested removal: %s", encodeForConsole(fileName))
+                #remove(fullName)
         self.logger.info("Done")
 
     def run(self):
