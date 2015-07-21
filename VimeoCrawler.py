@@ -43,7 +43,17 @@ try: # urlgrabber downloader library, requires pycurl
         if tuple(int(v) for v in urlgrabber.__version__.split('.')) < (3, 9, 1):
             raise ImportError('urlgrabber version %s < 3.9.1' % urlgrabber.__version__)
         else:
-            print "\nWARNING: You're using urlgrabber 3.9.1 which contains a known error.\nPlease use urlgrabber 3.10 or later whenever possible,\notherwise (on Windows) patch the urlgrabber source:\nLocate the file C:\\Python27\\Lib\\site-packages\\urlgrabber\\grabber.py\nand in line 1161 replace\nself.curl_obj.setopt(pycurl.SSL_VERIFYHOST, opts.ssl_verify_host)\nwith\nself.curl_obj.setopt(pycurl.SSL_VERIFYHOST, 0)\nSee https://ask.fedoraproject.org/en/question/35874/yum-pycurl-error-43/ for details.\n"
+            print """
+WARNING: You're using urlgrabber 3.9.1 which contains a known error.
+Please use urlgrabber 3.10 or later whenever possible,
+otherwise (on Windows) patch the urlgrabber source:
+Locate the file C:\\Python27\\Lib\\site-packages\\urlgrabber\\grabber.py
+and in line 1161 replace
+\tself.curl_obj.setopt(pycurl.SSL_VERIFYHOST, opts.ssl_verify_host)
+with
+\tself.curl_obj.setopt(pycurl.SSL_VERIFYHOST, 0)
+See https://ask.fedoraproject.org/en/question/35874/yum-pycurl-error-43/ for details.
+"""
 except ImportError, ex:
     print "%s: %s\nERROR: This software requires urlgrabber.\nPlease install urlgrabber v3.9.1 or later: https://pypi.python.org/pypi/urlgrabber\n" % (ex.__class__.__name__, ex)
     exit(-1)
@@ -74,7 +84,7 @@ except ImportError:
 
 isWindows = platform.lower().startswith('win')
 
-TITLE = 'VimeoCrawler v1.81 (c) 2013-2015 Vasily Zakharov vmzakhar@gmail.com'
+TITLE = 'VimeoCrawler v1.82 (c) 2013-2015 Vasily Zakharov vmzakhar@gmail.com'
 
 OPTION_NAMES = ('directory', 'login', 'max-items', 'retries', 'set-language', 'preset', 'timeout', 'webdriver')
 FIELD_NAMES = ('targetDirectory', 'credentials', 'maxItems', 'retryCount', 'setLanguage', 'setPreset', 'timeout', 'driverName')
