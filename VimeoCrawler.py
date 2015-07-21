@@ -74,7 +74,7 @@ except ImportError:
 
 isWindows = platform.lower().startswith('win')
 
-TITLE = 'VimeoCrawler v1.8 (c) 2013-2015 Vasily Zakharov vmzakhar@gmail.com'
+TITLE = 'VimeoCrawler v1.81 (c) 2013-2015 Vasily Zakharov vmzakhar@gmail.com'
 
 OPTION_NAMES = ('directory', 'login', 'max-items', 'retries', 'set-language', 'preset', 'timeout', 'webdriver')
 FIELD_NAMES = ('targetDirectory', 'credentials', 'maxItems', 'retryCount', 'setLanguage', 'setPreset', 'timeout', 'driverName')
@@ -363,7 +363,7 @@ class VimeoCrawler(object):
                 self.getElement('#email').send_keys(email)
                 self.getElement('#password').send_keys(password)
                 self.getElement('#login_form input[type=submit]').click()
-                self.getElement('#menu .me a').click()
+                self.getElement('#page_header h1 a').click()
                 sleep(1) # prevents occasional login fails
                 self.loggedIn = True
                 return
@@ -709,6 +709,7 @@ class VimeoCrawler(object):
             except Exception, e:
                 self.logger.warning("Can't create link at %s: %s", encodeForConsole(linkFileName), e)
                 self.errors += 1
+        self.logger.info("")
 
     def removeDuplicates(self):
         self.logger.info("Checking for duplicate files...")
