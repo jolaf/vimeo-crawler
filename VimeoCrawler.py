@@ -7,7 +7,7 @@ from os import fdopen, listdir, makedirs, remove
 from os.path import getmtime, getsize, isdir, isfile, join, lexists
 from subprocess import Popen, PIPE, STDOUT
 from sys import argv, exit, getfilesystemencoding, platform, stdout # pylint: disable=W0622
-from time import sleep, time
+from time import time
 from traceback import format_exc
 
 # Console output encoding and buffering problems fixing
@@ -25,6 +25,9 @@ try: # Selenium configuration
         raise ImportError('Selenium version %s < 2.45' % selenium.__version__)
     from selenium import webdriver
     from selenium.common.exceptions import NoSuchElementException
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.expected_conditions import presence_of_element_located as elementLocated
+    from selenium.webdriver.support.ui import WebDriverWait
     DRIVERS = dict((v.lower(), (v, getattr(webdriver, v))) for v in vars(webdriver) if v[0].isupper()) # ToDo: Make this list more precise
 except ImportError, ex:
     print "%s: %s\nERROR: This software requires Selenium.\nPlease install Selenium v2.45 or later: https://pypi.python.org/pypi/selenium\n" % (ex.__class__.__name__, ex)
@@ -55,7 +58,7 @@ with
 See https://ask.fedoraproject.org/en/question/35874/yum-pycurl-error-43/ for details.
 """
 except ImportError, ex:
-    print "%s: %s\nERROR: This software requires urlgrabber.\nPlease install urlgrabber v3.9.1 or later: https://pypi.python.org/pypi/urlgrabber\n" % (ex.__class__.__name__, ex)
+    print "%s: %s\nERROR: This software requires urlgrabber.\nPlease install urlgrabber v3.9.1, preferably 3.10 or later: https://pypi.python.org/pypi/urlgrabber\n" % (ex.__class__.__name__, ex)
     exit(-1)
 
 try: # Requests HTTP library
@@ -84,14 +87,14 @@ except ImportError:
 
 isWindows = platform.lower().startswith('win')
 
-TITLE = 'VimeoCrawler v1.82 (c) 2013-2015 Vasily Zakharov vmzakhar@gmail.com'
+TITLE = 'VimeoCrawler v1.83 (c) 2013-2015 Vasily Zakharov vmzakhar@gmail.com'
 
 OPTION_NAMES = ('directory', 'login', 'max-items', 'retries', 'set-language', 'preset', 'timeout', 'webdriver')
 FIELD_NAMES = ('targetDirectory', 'credentials', 'maxItems', 'retryCount', 'setLanguage', 'setPreset', 'timeout', 'driverName')
 SHORT_OPTIONS = ''.join(('%c:' % option[0]) for option in OPTION_NAMES) + 'hvnfzc'
 LONG_OPTIONS = tuple(('%s=' % option) for option in OPTION_NAMES) + ('help', 'verbose', 'no-download', 'no-folders', 'no-filesize', 'verify-content', 'hard-links', 'hd')
 
-USAGE_INFO = '''Usage: python VimeoCrawler.py [options] [start URL or video ID]
+USAGE_INFO = '''Usage: python VimeoCrawler.py [options] [startURL or videoID]
 
 The crawler checks the specified URL and processes the specified video,
 album, channel or the whole account, trying to locate the highest available
@@ -101,7 +104,7 @@ For every video found a file is downloaded to the target directory.
 For any channel or album encountered, a subfolder is created in the target
 directory, with symbolic links to the files in the target directory.
 
-In default configuration, the program requires Mozilla Firefox.
+In the default configuration, the software requires Mozilla Firefox installed.
 
 Options:
 -h --help - Displays this help message.
@@ -150,6 +153,8 @@ FOLDERS_LINKS = ('album', 'groups', 'channels') # http://vimeo.com/folder/*
 FOLDER_NAMES = {'albums': 'album', 'groups': 'group', 'channels': 'channel'} # Mapping to singular for printing
 FILE_PREFERENCES = ('Original', 'On2 HD', 'On2 SD', 'HD', 'SD', 'Mobile', 'file') # Vimeo file versions parts
 
+TIMEOUT = 10
+
 UNITS = ('bytes', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB')
 def readableSize(size):
     size = float(int(size))
@@ -177,7 +182,7 @@ def encodeForFileSystem(s):
 def getFileSize(fileName):
     try:
         return getsize(fileName)
-    except:
+    except Exception:
         return None
 
 class URL(object):
@@ -317,7 +322,7 @@ class VimeoCrawler(object):
             if self.setLanguage:
                 self.setLanguage = self.setLanguage.capitalize()
             if len(parameters) > 1:
-                raise Exception("Too many parameters")
+                raise ValueError("Too many parameters")
             if parameters:
                 self.startURL = URL(parameters[0])
             elif not self.credentials:
@@ -362,19 +367,18 @@ class VimeoCrawler(object):
         self.logger.info("Going to %s", url)
         self.driver.get(url.url)
 
-    def getElement(self, css):
-        return self.driver.find_element_by_css_selector(css)
+    def getElement(self, selector):
+        return self.driver.find_element_by_css_selector(selector)
 
     def login(self, email, password):
         for _ in xrange(self.retryCount):
             self.goTo('http://vimeo.com/log_in')
             self.logger.info("Logging in as %s...", email)
             try:
-                self.getElement('#email').send_keys(email)
-                self.getElement('#password').send_keys(password)
+                self.getElement('#signup_email').send_keys(email)
+                self.getElement('#login_password').send_keys(password)
                 self.getElement('#login_form input[type=submit]').click()
-                self.getElement('#page_header h1 a').click()
-                sleep(1) # prevents occasional login fails
+                WebDriverWait(self.driver, TIMEOUT).until(elementLocated((By.CSS_SELECTOR, '#page_header h1 a'))).click()
                 self.loggedIn = True
                 return
             except NoSuchElementException, e:
