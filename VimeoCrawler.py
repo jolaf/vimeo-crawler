@@ -16,7 +16,6 @@ stdout = fdopen(stdout.fileno(), 'w', 0)
 # ToDo: Report non-mentioned videos
 # ToDo: Verify already downloaded videos
 # ToDo: Do something to Knudepunkt TV problem
-# ToDo: Check video author, report it and do not attempt settings
 # ToDo: Gather all errors to re-display in the end
 
 try: # Selenium configuration
@@ -87,7 +86,7 @@ except ImportError:
 
 isWindows = platform.lower().startswith('win')
 
-TITLE = 'VimeoCrawler v1.83 (c) 2013-2015 Vasily Zakharov vmzakhar@gmail.com'
+TITLE = 'VimeoCrawler v1.84 (c) 2013-2015 Vasily Zakharov vmzakhar@gmail.com'
 
 OPTION_NAMES = ('directory', 'login', 'max-items', 'retries', 'set-language', 'preset', 'timeout', 'webdriver')
 FIELD_NAMES = ('targetDirectory', 'credentials', 'maxItems', 'retryCount', 'setLanguage', 'setPreset', 'timeout', 'driverName')
@@ -378,8 +377,13 @@ class VimeoCrawler(object):
                 self.getElement('#signup_email').send_keys(email)
                 self.getElement('#login_password').send_keys(password)
                 self.getElement('#login_form input[type=submit]').click()
-                WebDriverWait(self.driver, TIMEOUT).until(elementLocated((By.CSS_SELECTOR, '#page_header h1 a'))).click()
+                welcomeLink = WebDriverWait(self.driver, TIMEOUT).until(elementLocated((By.CSS_SELECTOR, '#page_header h1 a')))
+                userName = welcomeLink.text.strip()
+                self.logger.info("Logged in as %s...", userName)
+                welcomeLink.click()
+                WebDriverWait(self.driver, TIMEOUT).until(elementLocated((By.CSS_SELECTOR, '#content')))
                 self.loggedIn = True
+                self.userName = userName
                 return
             except NoSuchElementException, e:
                 self.logger.error("Login failed: %s", e.msg)
@@ -408,14 +412,18 @@ class VimeoCrawler(object):
 
     def getItemsFromFolder(self):
         items = []
+        numPages = 0
         for _ in xrange(self.maxItems) if self.maxItems != None else count():
             items.extend(self.getItemsFromPage())
+            numPages += 1
             try:
                 self.getElement('.pagination a[rel=next]').click()
             except NoSuchElementException:
                 break
         items = tuple(items)
         assert len(items) == len(set(items))
+        if numPages > 1:
+            self.logger.info("Got total of %d items", len(items))
         return items
 
     def getItemsFromURL(self, url = None, target = None):
@@ -529,96 +537,104 @@ class VimeoCrawler(object):
             targetFileName = encodeForFileSystem(join(self.targetDirectory, fileName))
             if self.setLanguage or self.setPreset or self.setHD:
                 try:
-                    self.driver.find_element_by_id('change_settings').click()
-                    if self.setLanguage:
-                        try:
-                            languages = self.driver.find_elements_by_css_selector('select[name=language] option')
-                            currentLanguage = ([l for l in languages if l.is_selected()] or [None,])[0]
-                            if currentLanguage is None or currentLanguage is languages[0]:
-                                ls = [l for l in languages if l.text.capitalize().startswith(self.setLanguage)]
-                                if len(ls) != 1:
-                                    ls = [l for l in languages if l.get_attribute('value').capitalize().startswith(self.setLanguage)]
-                                if len(ls) == 1:
-                                    self.logger.info("Language not set, setting to %s", ls[0].text)
-                                    ls[0].click()
-                                    self.driver.find_element_by_css_selector('#settings_form input[type=submit]').click()
-                                else:
-                                    self.logger.error("Unsupported language: %s", self.setLanguage)
-                                    self.setLanguage = None
-                            else:
-                                self.logger.info("Language is already set to %s / %s", currentLanguage.get_attribute('value').upper(), currentLanguage.text)
-                        except NoSuchElementException:
-                            self.logger.warning("Failed to set language to %s", self.setLanguage)
-                    if self.setHD:
-                        try:
-                            self.driver.find_element_by_css_selector('#tabs a[title="Video File"]').click()
-                            try:
-                                for i in xrange(self.retryCount):
-                                    try:
-                                        radio = self.driver.find_element_by_id('hd_profile_1080')
-                                        break
-                                    except NoSuchElementException, e:
-                                        if i == self.retryCount - 1:
-                                            raise
-                                if radio.is_selected():
-                                    self.logger.info("Video already set to 1080p")
-                                elif not radio.is_enabled():
-                                    self.logger.info("Video cannot be set to 1080p")
-                                else:
-                                    self.logger.info("Setting video to 1080p")
-                                    radio.click()
-                                    self.driver.find_element_by_id('upgrade_video').click()
-                            except NoSuchElementException:
-                                self.logger.warning("Failed to set video to 1080p")
-                        except NoSuchElementException:
-                            self.logger.warning("Failed to access Video File settings")
-                    if self.setPreset or self.setHD:
-                        try:
-                            self.driver.find_element_by_css_selector('#tabs a[title=Embed]').click()
-                            if self.setHD:
-                                try:
-                                    for i in xrange(self.retryCount):
-                                        try:
-                                            checkbox = self.driver.find_element_by_css_selector('input[name=allow_hd_embed]')
-                                            break
-                                        except NoSuchElementException, e:
-                                            if i == self.retryCount - 1:
-                                                raise
-                                    if checkbox.is_selected():
-                                        self.logger.info("Embed already set to HD")
-                                    else:
-                                        self.logger.info("Setting embed to HD")
-                                        checkbox.click()
-                                        self.driver.find_element_by_css_selector('#settings_form input[name=save_embed_settings]').click()
-                                except NoSuchElementException:
-                                    self.logger.warning("Failed to set playback to HD")
-                            if self.setPreset:
-                                try:
-                                    for i in xrange(self.retryCount):
-                                        try:
-                                            presets = self.driver.find_elements_by_css_selector("select#preset option")
-                                            break
-                                        except NoSuchElementException, e:
-                                            if i == self.retryCount - 1:
-                                                raise
-                                    currentPreset = ([p for p in presets if p.is_selected()] or [None,])[0]
-                                    if currentPreset and currentPreset.text.capitalize() == self.setPreset:
-                                        self.logger.info("Preset is already set to %s", self.setPreset)
-                                    else:
-                                        presets = [p for p in presets if p.text.capitalize() == self.setPreset]
-                                        if presets:
-                                            self.logger.info("Preset %s, setting to %s", ('is set to %s' % currentPreset.text.capitalize()) if currentPreset else 'is not set', self.setPreset)
-                                            presets[0].click()
-                                            self.driver.find_element_by_css_selector('#settings_form input[name=save_embed_settings]').click()
-                                        else:
-                                            self.logger.error("Unknown preset: %s", self.setPreset)
-                                            self.setPreset = None
-                                except NoSuchElementException:
-                                    self.logger.warning("Failed to set preset to %s", self.setPreset)
-                        except NoSuchElementException:
-                            self.logger.warning("Failed to access Embed settings")
+                    author = self.driver.find_elements_by_css_selector('#page_header .byline a[rel=author]').text.strip()
                 except NoSuchElementException:
-                    self.logger.warning("Failed to access settings")
+                    self.logger.error("Failed to identify author")
+                    author = None
+                if author not in (None, self.userName):
+                    self.logger.warning("Video author is %s, skipping adusting settings", author)
+                else: # matching author or unindentified author
+                    try:
+                        self.driver.find_element_by_id('change_settings').click()
+                        if self.setLanguage:
+                            try:
+                                languages = self.driver.find_elements_by_css_selector('select[name=language] option')
+                                currentLanguage = ([l for l in languages if l.is_selected()] or [None,])[0]
+                                if currentLanguage is None or currentLanguage is languages[0]:
+                                    ls = [l for l in languages if l.text.capitalize().startswith(self.setLanguage)]
+                                    if len(ls) != 1:
+                                        ls = [l for l in languages if l.get_attribute('value').capitalize().startswith(self.setLanguage)]
+                                    if len(ls) == 1:
+                                        self.logger.info("Language not set, setting to %s", ls[0].text)
+                                        ls[0].click()
+                                        self.driver.find_element_by_css_selector('#settings_form input[type=submit]').click()
+                                    else:
+                                        self.logger.error("Unsupported language: %s", self.setLanguage)
+                                        self.setLanguage = None
+                                else:
+                                    self.logger.info("Language is already set to %s / %s", currentLanguage.get_attribute('value').upper(), currentLanguage.text)
+                            except NoSuchElementException:
+                                self.logger.warning("Failed to set language to %s", self.setLanguage)
+                        if self.setHD:
+                            try:
+                                self.driver.find_element_by_css_selector('#tabs a[title="Video File"]').click()
+                                try:
+                                    for i in xrange(self.retryCount):
+                                        try:
+                                            radio = self.driver.find_element_by_id('hd_profile_1080')
+                                            break
+                                        except NoSuchElementException, e:
+                                            if i == self.retryCount - 1:
+                                                raise
+                                    if radio.is_selected():
+                                        self.logger.info("Video already set to 1080p")
+                                    elif not radio.is_enabled():
+                                        self.logger.info("Video cannot be set to 1080p")
+                                    else:
+                                        self.logger.info("Setting video to 1080p")
+                                        radio.click()
+                                        self.driver.find_element_by_id('upgrade_video').click()
+                                except NoSuchElementException:
+                                    self.logger.warning("Failed to set video to 1080p")
+                            except NoSuchElementException:
+                                self.logger.warning("Failed to access Video File settings")
+                        if self.setPreset or self.setHD:
+                            try:
+                                self.driver.find_element_by_css_selector('#tabs a[title=Embed]').click()
+                                if self.setHD:
+                                    try:
+                                        for i in xrange(self.retryCount):
+                                            try:
+                                                checkbox = self.driver.find_element_by_css_selector('input[name=allow_hd_embed]')
+                                                break
+                                            except NoSuchElementException, e:
+                                                if i == self.retryCount - 1:
+                                                    raise
+                                        if checkbox.is_selected():
+                                            self.logger.info("Embed already set to HD")
+                                        else:
+                                            self.logger.info("Setting embed to HD")
+                                            checkbox.click()
+                                            self.driver.find_element_by_css_selector('#settings_form input[name=save_embed_settings]').click()
+                                    except NoSuchElementException:
+                                        self.logger.warning("Failed to set playback to HD")
+                                if self.setPreset:
+                                    try:
+                                        for i in xrange(self.retryCount):
+                                            try:
+                                                presets = self.driver.find_elements_by_css_selector("select#preset option")
+                                                break
+                                            except NoSuchElementException, e:
+                                                if i == self.retryCount - 1:
+                                                    raise
+                                        currentPreset = ([p for p in presets if p.is_selected()] or [None,])[0]
+                                        if currentPreset and currentPreset.text.capitalize() == self.setPreset:
+                                            self.logger.info("Preset is already set to %s", self.setPreset)
+                                        else:
+                                            presets = [p for p in presets if p.text.capitalize() == self.setPreset]
+                                            if presets:
+                                                self.logger.info("Preset %s, setting to %s", ('is set to %s' % currentPreset.text.capitalize()) if currentPreset else 'is not set', self.setPreset)
+                                                presets[0].click()
+                                                self.driver.find_element_by_css_selector('#settings_form input[name=save_embed_settings]').click()
+                                            else:
+                                                self.logger.error("Unknown preset: %s", self.setPreset)
+                                                self.setPreset = None
+                                    except NoSuchElementException:
+                                        self.logger.warning("Failed to set preset to %s", self.setPreset)
+                            except NoSuchElementException:
+                                self.logger.warning("Failed to access Embed settings")
+                    except NoSuchElementException:
+                        self.logger.warning("Failed to access settings")
             if link: # Downloading file
                 if linkSize:
                     localSize = getFileSize(targetFileName)
@@ -748,6 +764,7 @@ class VimeoCrawler(object):
     def run(self):
         self.doCreateFolders = False
         self.loggedIn = False
+        self.userName = None
         self.vIDs = []
         self.folders = []
         self.totalFileSize = 0
