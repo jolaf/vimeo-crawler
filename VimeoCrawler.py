@@ -2,20 +2,17 @@
 from getopt import getopt
 from itertools import count
 from logging import getLogger, Formatter, FileHandler, StreamHandler, DEBUG, INFO, WARNING
-from re import match
+from re import compile as reCompile
 from os import fdopen, listdir, makedirs, remove
 from os.path import getmtime, getsize, isdir, isfile, join, lexists
 from subprocess import Popen, PIPE, STDOUT
-from sys import argv, exit, getfilesystemencoding, platform, stdout # pylint: disable=W0622
+from sys import argv, exit as sysExit, getfilesystemencoding, platform, stdout
 from time import time
 from traceback import format_exc
 
 # Console output encoding and buffering problems fixing
 stdout = fdopen(stdout.fileno(), 'w', 0)
 
-# ToDo: Report non-mentioned videos
-# ToDo: Verify already downloaded videos
-# ToDo: Warn about private videos
 # ToDo: Gather all errors to re-display in the end
 
 try: # Selenium configuration
@@ -30,13 +27,13 @@ try: # Selenium configuration
     DRIVERS = dict((v.lower(), (v, getattr(webdriver, v))) for v in vars(webdriver) if v[0].isupper()) # ToDo: Make this list more precise
 except ImportError, ex:
     print "%s: %s\nERROR: This software requires Selenium.\nPlease install Selenium v2.45 or later: https://pypi.python.org/pypi/selenium\n" % (ex.__class__.__name__, ex)
-    exit(-1)
+    sysExit(-1)
 
-try: # pycurl downloader library
-    import pycurl # required by urlgrabber # pylint: disable=W0611
+try: # pycurl downloader library, required by urlgrabber
+    import pycurl # pylint: disable=W0611
 except ImportError, ex:
     print "%s: %s\nERROR: This software requires pycurl.\nPlease install pycurl v7.19.3.1 or later: https://pypi.python.org/pypi/pycurl\n" % (ex.__class__.__name__, ex)
-    exit(-1)
+    sysExit(-1)
 
 try: # urlgrabber downloader library, requires pycurl
     import urlgrabber
@@ -58,7 +55,7 @@ See https://ask.fedoraproject.org/en/question/35874/yum-pycurl-error-43/ for det
 """
 except ImportError, ex:
     print "%s: %s\nERROR: This software requires urlgrabber.\nPlease install urlgrabber v3.9.1, preferably 3.10 or later: https://pypi.python.org/pypi/urlgrabber\n" % (ex.__class__.__name__, ex)
-    exit(-1)
+    sysExit(-1)
 
 try: # Requests HTTP library
     import requests
@@ -69,10 +66,10 @@ except ImportError, ex:
     print "%s: %s\nWARNING: Video size information will not be available.\nPlease install Requests v2.3.0 or later: https://pypi.python.org/pypi/requests\n" % (ex.__class__.__name__, ex)
 
 try: # Filesystem symbolic links configuration
-    from os import link as hardlink, symlink # UNIX # pylint: disable=E0611, W0611
+    from os import link as hardlink, symlink # UNIX # pylint: disable=E0611
 except ImportError:
     try:
-        from ctypes import windll
+        from ctypes import windll # Windows
         dll = windll.LoadLibrary('kernel32.dll')
         def hardlink(source, linkName):
             if not dll.CreateHardLinkW(linkName, source, None):
@@ -86,12 +83,13 @@ except ImportError:
 
 isWindows = platform.lower().startswith('win')
 
-TITLE = 'VimeoCrawler v1.86 (c) 2013-2015 Vasily Zakharov vmzakhar@gmail.com'
+TITLE = 'VimeoCrawler v1.87 (c) 2013-2015 Vasily Zakharov vmzakhar@gmail.com'
 
 OPTION_NAMES = ('directory', 'login', 'max-items', 'retries', 'set-language', 'preset', 'timeout', 'webdriver')
 FIELD_NAMES = ('targetDirectory', 'credentials', 'maxItems', 'retryCount', 'setLanguage', 'setPreset', 'timeout', 'driverName')
-SHORT_OPTIONS = ''.join(('%c:' % option[0]) for option in OPTION_NAMES) + 'hvnfzc'
-LONG_OPTIONS = tuple(('%s=' % option) for option in OPTION_NAMES) + ('help', 'verbose', 'no-download', 'no-folders', 'no-filesize', 'verify-content', 'hard-links', 'hd')
+SHORT_OPTIONS = ''.join(('%c:' % option[0]) for option in OPTION_NAMES) + 'hvnfzceo'
+LONG_OPTIONS = tuple(('%s=' % option) for option in OPTION_NAMES) + ('help', 'verbose', 'no-download', 'no-folders', 'no-filesize', 'verify-content', 'verify-existing', 'detect-obsolete', 'hard-links', 'hd')
+OPTION_PATTERNS = tuple(reCompile(pattern) for pattern in (r'-([^-\s])', r'--(\S+)'))
 
 USAGE_INFO = '''Usage: python VimeoCrawler.py [options] [startURL or videoID]
 
@@ -114,19 +112,18 @@ Options:
    --hard-links - Use hard links instead of symbolic links in subfolders.
 
 -l --login - Vimeo login credentials, formatted as email:password.
--d --directory - Target directory to save all the output files to,
-                 default is the current directory.
+-d --directory - Target directory to save all the output files to, default is the current directory.
 
 -w --webdriver - Selenium WebDriver to use for crawling, default is Firefox.
 -t --timeout - Download attempt timeout, default is 60 seconds.
 -r --retries - Number of page download retry attempts, default is 3.
--m --max-items - Maximum number of items (videos or folders) to retrieve
-                 from one page (usable for testing), default is none.
+-m --max-items - Maximum number of items (videos or folders) to retrieve from one page (usable for testing), default is none.
 -s --set-language - Try to set the specified language on all crawled videos.
 -p --preset - Try to set the specified embed preset on all crawled videos.
    --hd - Try to set all crawled videos to embed as HD.
--c --verify-content - Verify downloaded files to be valid video files,
-                 requires ffmpeg to be available in the path.
+-c --verify-content - Verify downloaded files to be valid video files, requires ffmpeg to be available in the path.
+-e --verify-existing - Verify already downloaded files to be valid video files, requires ffmpeg to be available in the path.
+-o --detect-obsolete - Report existing downloaded files not checked during the run.
 
 If start URL is not specified, the login credentials have to be specified.
 In that case, the whole account for those credentials would be crawled.
@@ -138,7 +135,7 @@ def usage(error = None):
     print USAGE_INFO
     if error:
         print error
-    exit(2 if error else 0)
+    sysExit(2 if error else 0)
 
 LOG_FILE_NAME = 'VimeoCrawler.log'
 
@@ -147,10 +144,10 @@ VIMEO_URL = 'https://%s/%%s' % VIMEO
 
 SYSTEM_LINKS = ('about', 'blog', 'categories', 'channels', 'cookie_policy', 'couchmode', 'creativecommons', 'creatorservices', 'dmca', 'enhancer', 'everywhere', 'explore', 'groups', 'help', 'jobs', 'join', 'log_in', 'love', 'musicstore', 'ondemand', 'plus', 'privacy', 'pro', 'robots.txt', 'search', 'site_map', 'staffpicks', 'terms', 'upload', 'videoschool') # http://vimeo.com/link
 CATEGORIES_LINKS = ('albums', 'groups', 'channels') # http://vimeo.com/account/category
-VIDEOS_LINKS = ('videos') # http://vimeo.com/account/videos URLs
+VIDEOS_LINKS = ('videos') # http://vimeo.com/account/videos
 FOLDERS_LINKS = ('album', 'groups', 'channels') # http://vimeo.com/folder/*
 FOLDER_NAMES = {'albums': 'album', 'groups': 'group', 'channels': 'channel'} # Mapping to singular for printing
-FILE_PREFERENCES = ('Original', 'On2 HD', 'On2 SD', 'HD', 'SD') # Vimeo file versions parts
+FILE_PREFERENCES = ('Original', 'On2 HD', 'On2 SD', 'HD', 'SD') # Vimeo file versions names
 
 UNITS = ('bytes', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB')
 def readableSize(size):
@@ -242,6 +239,8 @@ class VimeoCrawler(object):
         self.setPreset = False
         self.setHD = False
         self.verifyContent = False
+        self.verifyExisting = False
+        self.detectObsolete = False
         # Selenium WebDriver settings
         self.driver = None
         self.driverName = 'Firefox'
@@ -270,14 +269,18 @@ class VimeoCrawler(object):
                     self.getFileSizes = False
                 elif option in ('-c', '--verify-content'):
                     self.verifyContent = True
+                elif option in ('-e', '--verify-existing'):
+                    self.verifyExisting = True
+                elif option in ('-o', '--detect-obsolete'):
+                    self.detectObsolete = True
                 elif option in ('--hard-links',):
                     self.useHardLinks = True
                 elif option in ('--hd',):
                     self.setHD = True
                 else: # Parsing options with arguments
                     index = None
-                    for (maskNum, mask) in enumerate(('-([^-])', '--(.*)')):
-                        m = match(mask, option)
+                    for (maskNum, pattern) in enumerate(OPTION_PATTERNS):
+                        m = pattern.match(option)
                         if not m:
                             continue
                         index = tuple(OPTION_NAMES.index(option) for option in OPTION_NAMES if (option if maskNum else option[0]) == m.group(1))
@@ -347,11 +350,11 @@ class VimeoCrawler(object):
                 subprocess = Popen('ffmpeg', shell = True, stdout = PIPE, stderr = STDOUT)
                 if subprocess.returncode:
                     self.logger.error("FAILED (code %d), content verification NOT enabled", subprocess.returncode)
-                    self.verifyContent = False
+                    self.verifyContent = self.verifyExisting = False
                 else:
                     self.logger.info("OK")
         except Exception, e:
-            usage("ERROR: %s\n" % e)
+            usage("ERROR: %s" % e)
 
     def createDir(self, dirName = None):
         dirName = join(self.targetDirectory, dirName) if dirName else self.targetDirectory
@@ -372,7 +375,7 @@ class VimeoCrawler(object):
                 raise TimeoutException()
             return WebDriverWait(self.driver, self.timeout).until(condition((By.CSS_SELECTOR, selector)))
         except TimeoutException:
-            return finder(selector) # Would throw NoSuchElementException
+            return finder(selector) # Would throw NoSuchElementException to be printed properly later
 
     def getElements(self, selector):
         return self.getElement(selector, multiple = True)
@@ -488,6 +491,18 @@ class VimeoCrawler(object):
         for item in items:
             self.getItemsFromURL(item, target)
 
+    def verifyFile(self, fileName):
+        self.logger.info("Verifying...")
+        subprocess = Popen('ffmpeg -v error -i "%s" -f null -' % fileName, shell = True, stdout = PIPE, stderr = STDOUT)
+        output = subprocess.communicate()[0]
+        if subprocess.returncode:
+            self.logger.error("Verification failed, code %d", subprocess.returncode)
+            return False
+        elif output:
+            self.logger.error("Verification ERROR: %s", '\n'.join([s for s in output.splitlines() if "Last message repeated" not in s][-4:]))
+            return False
+        return True
+
     def processVideo(self, vID, number):
         title = ''
         download = None
@@ -524,7 +539,7 @@ class VimeoCrawler(object):
             link = str(link.get_attribute('href'))
             if self.getFileSizes:
                 try:
-                    request = requests.get(link, stream = True, headers = { 'user-agent': userAgent }, cookies = dict((str(cookie['name']), str(cookie['value'])) for cookie in cookies))
+                    request = requests.get(link, stream = True, headers = {'user-agent': userAgent}, cookies = dict((str(cookie['name']), str(cookie['value'])) for cookie in cookies))
                     request.close()
                     linkSize = int(request.headers['content-length'])
                     self.totalFileSize += linkSize
@@ -540,6 +555,11 @@ class VimeoCrawler(object):
         self.logger.info(' '.join((prefix, suffix)))
         fileName = cleanupFileName('%s.%s' % (' '.join(((title.decode(CONSOLE_ENCODING),) if title else ()) + (str(vID),)), extension.lower())) # unicode
         targetFileName = encodeForFileSystem(join(self.targetDirectory, fileName))
+        try:
+            self.getElement('.private')
+            self.logger.warning("This video is PRIVATE")
+        except NoSuchElementException:
+            pass
         if self.setLanguage or self.setPreset or self.setHD:
             try:
                 author = self.getElement('#page_header .byline a[rel=author]').text.strip()
@@ -548,7 +568,7 @@ class VimeoCrawler(object):
                 author = None
             if author not in (None, self.userName):
                 self.logger.warning("Video author is %s, skipping settings", author)
-            else: # matching author or unindentified author
+            else: # Matching author or unindentified author
                 try:
                     self.getElement('#change_settings').click()
                     if self.setLanguage:
@@ -632,12 +652,14 @@ class VimeoCrawler(object):
                 if localSize == linkSize:
                     downloadOK = True
                 elif localSize > linkSize:
+                    downloadSkip = True
                     self.errors += 1
                     self.logger.error("Local file is larger (%d) than remote file (%d)", localSize, linkSize)
-                    downloadSkip = True
-                    #remove(targetFileName)
-                    #localSize = None
-            if self.doDownload and not downloadSkip and not downloadOK:
+            if downloadOK or downloadSkip:
+                if self.verifyExisting and not self.verifyFile(targetFileName):
+                    self.errors += 1
+                    downloadOK = False
+            elif self.doDownload:
                 timeout = self.timeout
                 class ProgressIndicator(object):
                     QUANTUM = 10 * 1024 * 1024 # 10 megabytes
@@ -661,7 +683,7 @@ class VimeoCrawler(object):
                         if totalRead == 0:
                             self.started = True
                         elif totalRead <= self.totalRead:
-                            if time() > self.lastData + timeout: # pylint: disable=W0640
+                            if time() > self.lastData + timeout:
                                 raise URLGrabError("Download seems stalled")
                         else:
                             self.totalRead = totalRead
@@ -681,34 +703,29 @@ class VimeoCrawler(object):
                     grabber.urlgrab(link, filename = targetFileName)
                     downloadOK = True
                 except URLGrabError, e:
-                    self.errors += 1
                     self.logger.error("Download failed: %s", e)
-                except KeyboardInterrupt:
                     self.errors += 1
+                except KeyboardInterrupt:
                     self.logger.error("Download interrupted")
+                    self.errors += 1
                 if downloadOK:
                     localSize = getFileSize(targetFileName)
                     if not localSize:
+                        self.logger.error("Downloaded file seems corrupt")
                         self.errors += 1
                         downloadOK = False
-                        self.logger.error("Downloaded file seems corrupt")
                     elif linkSize:
                         if localSize > linkSize:
-                            self.errors += 1
-                            downloadOK = False
                             self.logger.error("Downloaded file larger (%d) than remote file (%d)", localSize, linkSize)
-                        elif localSize < linkSize:
                             self.errors += 1
                             downloadOK = False
+                        elif localSize < linkSize:
                             self.logger.error("Downloaded file smaller (%d) than remote file (%d)", localSize, linkSize)
-                        elif self.verifyContent: # Verifying downloaded file
-                            self.logger.info("Verifying...")
-                            subprocess = Popen('ffmpeg -v error -i "%s" -f null -' % targetFileName, shell = True, stdout = PIPE, stderr = STDOUT)
-                            output = subprocess.communicate()[0]
-                            if subprocess.returncode:
-                                self.logger.warning("Verification failed, code %d", subprocess.returncode)
-                            elif output:
-                                self.logger.error("Verification ERROR: %s", '\n'.join([s for s in output.splitlines() if "Last message repeated" not in s][-4:]))
+                            self.errors += 1
+                            downloadOK = False
+                        elif self.verifyContent and not self.verifyFile(targetFileName):
+                            self.errors += 1
+                            downloadOK = False
             if downloadOK:
                 self.logger.info("OK")
             elif downloadSkip or not self.doDownload:
@@ -728,8 +745,8 @@ class VimeoCrawler(object):
                 self.errors += 1
         self.logger.info("")
 
-    def removeDuplicates(self):
-        self.logger.info("Checking for duplicate files...")
+    def checkForObsoletes(self):
+        self.logger.info("Checking for obsolete files...")
         files = {}
         for fileName in listdir(unicode(self.targetDirectory)):
             if '.' not in fileName:
@@ -737,15 +754,21 @@ class VimeoCrawler(object):
             fullName = join(self.targetDirectory, fileName)
             if not isfile(fullName):
                 continue
-            keyName = str(fileName[fileName.rfind(' ') + 1 : fileName.rfind('.')])
-            files[keyName] = files.get(keyName, []) + [(fileName, fullName),]
-        for (keyName, fullNames) in files.iteritems():
-            assert fullNames
-            if len(fullNames) == 1:
+            try:
+                vID = int(fileName[fileName.rfind(' ') + 1 : fileName.rfind('.')])
+                files[vID] = files.get(vID, []) + [(fileName, fullName),]
+            except ValueError:
+                pass
+        for (vID, fileNames) in files.iteritems():
+            assert fileNames
+            if self.detectObsolete and vID not in self.vIDs:
+                for (fileName, fullName) in fileNames:
+                    self.logger.info("Unknown vID file detected: %s", encodeForConsole(fileName))
                 continue
-            for (fileName, fullName) in sorted(fullNames, key = lambda (fileName, fullName): (getsize(fullName), getmtime(fullName)))[:-1]:
-                self.logger.info("Duplicate detected, suggested removal: %s", encodeForConsole(fileName))
-                #remove(fullName)
+            if len(fileNames) == 1:
+                continue
+            for (fileName, fullName) in sorted(fileNames, key = lambda (fileName, fullName): (getsize(fullName), getmtime(fullName)))[:-1]:
+                self.logger.info("Duplicate vID file detected: %s", encodeForConsole(fileName))
         self.logger.info("Done")
 
     def run(self):
@@ -780,11 +803,11 @@ class VimeoCrawler(object):
             if self.driver:
                 self.driver.close()
         self.logger.info("Crawling completed" + (' with %d errors' % self.errors if self.errors else ''))
-        self.removeDuplicates()
+        self.checkForObsoletes()
         return self.errors
 
 def main(args):
-    exit(1 if VimeoCrawler(args).run() else 0)
+    sysExit(1 if VimeoCrawler(args).run() else 0)
 
 if __name__ == '__main__':
     main(argv[1:])
