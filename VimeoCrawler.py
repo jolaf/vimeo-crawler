@@ -15,7 +15,7 @@ stdout = fdopen(stdout.fileno(), 'w', 0)
 
 # ToDo: Report non-mentioned videos
 # ToDo: Verify already downloaded videos
-# ToDo: Do something to Knudepunkt TV problem
+# ToDo: Warn about private videos
 # ToDo: Gather all errors to re-display in the end
 
 try: # Selenium configuration
@@ -23,9 +23,9 @@ try: # Selenium configuration
     if tuple(int(v) for v in selenium.__version__.split('.')) < (2, 45):
         raise ImportError('Selenium version %s < 2.45' % selenium.__version__)
     from selenium import webdriver
-    from selenium.common.exceptions import NoSuchElementException
+    from selenium.common.exceptions import NoSuchElementException, TimeoutException
     from selenium.webdriver.common.by import By
-    from selenium.webdriver.support.expected_conditions import presence_of_element_located as elementLocated
+    from selenium.webdriver.support.expected_conditions import presence_of_element_located, presence_of_all_elements_located
     from selenium.webdriver.support.ui import WebDriverWait
     DRIVERS = dict((v.lower(), (v, getattr(webdriver, v))) for v in vars(webdriver) if v[0].isupper()) # ToDo: Make this list more precise
 except ImportError, ex:
@@ -86,7 +86,7 @@ except ImportError:
 
 isWindows = platform.lower().startswith('win')
 
-TITLE = 'VimeoCrawler v1.85 (c) 2013-2015 Vasily Zakharov vmzakhar@gmail.com'
+TITLE = 'VimeoCrawler v1.86 (c) 2013-2015 Vasily Zakharov vmzakhar@gmail.com'
 
 OPTION_NAMES = ('directory', 'login', 'max-items', 'retries', 'set-language', 'preset', 'timeout', 'webdriver')
 FIELD_NAMES = ('targetDirectory', 'credentials', 'maxItems', 'retryCount', 'setLanguage', 'setPreset', 'timeout', 'driverName')
@@ -150,9 +150,7 @@ CATEGORIES_LINKS = ('albums', 'groups', 'channels') # http://vimeo.com/account/c
 VIDEOS_LINKS = ('videos') # http://vimeo.com/account/videos URLs
 FOLDERS_LINKS = ('album', 'groups', 'channels') # http://vimeo.com/folder/*
 FOLDER_NAMES = {'albums': 'album', 'groups': 'group', 'channels': 'channel'} # Mapping to singular for printing
-FILE_PREFERENCES = ('Original', 'On2 HD', 'On2 SD', 'HD', 'SD', 'Mobile', 'file') # Vimeo file versions parts
-
-TIMEOUT = 10
+FILE_PREFERENCES = ('Original', 'On2 HD', 'On2 SD', 'HD', 'SD') # Vimeo file versions parts
 
 UNITS = ('bytes', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB')
 def readableSize(size):
@@ -251,7 +249,7 @@ class VimeoCrawler(object):
         # Options with parameters
         self.credentials = None
         self.targetDirectory = '.'
-        self.timeout = 60
+        self.timeout = 10
         self.retryCount = 3
         self.maxItems = None
         self.setLanguage = None
@@ -366,8 +364,18 @@ class VimeoCrawler(object):
         self.logger.info("Going to %s", url)
         self.driver.get(url.url)
 
-    def getElement(self, selector):
-        return self.driver.find_element_by_css_selector(selector)
+    def getElement(self, selector, fast = False, multiple = False):
+        condition = presence_of_all_elements_located if multiple else presence_of_element_located
+        finder = self.driver.find_elements_by_css_selector if multiple else self.driver.find_element_by_css_selector
+        try:
+            if fast:
+                raise TimeoutException()
+            return WebDriverWait(self.driver, self.timeout).until(condition((By.CSS_SELECTOR, selector)))
+        except TimeoutException:
+            return finder(selector) # Would throw NoSuchElementException
+
+    def getElements(self, selector):
+        return self.getElement(selector, multiple = True)
 
     def login(self, email, password):
         self.goTo('http://vimeo.com/log_in')
@@ -376,11 +384,11 @@ class VimeoCrawler(object):
             self.getElement('#signup_email').send_keys(email)
             self.getElement('#login_password').send_keys(password)
             self.getElement('#login_form input[type=submit]').click()
-            welcomeLink = WebDriverWait(self.driver, TIMEOUT).until(elementLocated((By.CSS_SELECTOR, '#page_header h1 a')))
+            welcomeLink = self.getElement('#page_header h1 a')
             userName = welcomeLink.text.strip()
             self.logger.info("Logged in as %s...", userName)
             welcomeLink.click()
-            WebDriverWait(self.driver, TIMEOUT).until(elementLocated((By.CSS_SELECTOR, '#content')))
+            self.getElement('#content')
             self.loggedIn = True
             self.userName = userName
             return
@@ -390,7 +398,7 @@ class VimeoCrawler(object):
     def getItemsFromPage(self):
         self.logger.info("Processing %s", self.driver.current_url)
         try:
-            links = self.driver.find_elements_by_css_selector('#browse_content .browse a')
+            links = self.getElements('#browse_content .browse a')
             links = (link.get_attribute('href') for link in links)
             items = tuple(URL(link) for link in links if VIMEO in link and not link.endswith('settings'))[:self.maxItems]
         except NoSuchElementException, e:
@@ -415,7 +423,7 @@ class VimeoCrawler(object):
             items.extend(self.getItemsFromPage())
             numPages += 1
             try:
-                self.getElement('.pagination a[rel=next]').click()
+                self.getElement('.pagination a[rel=next]', fast = True).click()
             except NoSuchElementException:
                 break
         items = tuple(items)
@@ -487,10 +495,10 @@ class VimeoCrawler(object):
             self.goTo(vID)
             title = encodeForConsole(self.getElement('#page_header h1').text.strip().rstrip('.'))
             try:
-                self.driver.find_element_by_class_name('iconify_down_b').click()
+                self.getElement('.iconify_down_b', fast = True).click()
                 download = self.getElement('#download')
             except NoSuchElementException, e:
-                self.logger.error("Download function not available")
+                pass
         except NoSuchElementException, e:
             self.logger.warning(e.msg)
             self.logger.error("Page load failed")
@@ -500,10 +508,14 @@ class VimeoCrawler(object):
         if download:
             for preference in FILE_PREFERENCES:
                 try:
-                    link = download.find_element_by_partial_link_text(preference)
-                    break
+                    link = download.find_element_by_link_text(preference)
                 except NoSuchElementException:
-                    pass
+                    try:
+                        link = download.find_element_by_partial_link_text(preference)
+                    except NoSuchElementException:
+                        pass
+                if link:
+                    break
         if link: # Parse chosen download link
             userAgent = str(self.driver.execute_script('return window.navigator.userAgent'))
             cookies = self.driver.get_cookies()
@@ -530,18 +542,18 @@ class VimeoCrawler(object):
         targetFileName = encodeForFileSystem(join(self.targetDirectory, fileName))
         if self.setLanguage or self.setPreset or self.setHD:
             try:
-                author = self.driver.find_element_by_css_selector('#page_header .byline a[rel=author]').text.strip()
+                author = self.getElement('#page_header .byline a[rel=author]').text.strip()
             except NoSuchElementException:
                 self.logger.error("Failed to identify author")
                 author = None
             if author not in (None, self.userName):
-                self.logger.warning("Video author is %s, skipping adusting settings", author)
+                self.logger.warning("Video author is %s, skipping settings", author)
             else: # matching author or unindentified author
                 try:
-                    self.driver.find_element_by_id('change_settings').click()
+                    self.getElement('#change_settings').click()
                     if self.setLanguage:
                         try:
-                            languages = self.driver.find_elements_by_css_selector('select[name=language] option')
+                            languages = self.getElements('select[name=language] option')
                             currentLanguage = ([l for l in languages if l.is_selected()] or [None,])[0]
                             if currentLanguage is None or currentLanguage is languages[0]:
                                 ls = [l for l in languages if l.text.capitalize().startswith(self.setLanguage)]
@@ -550,7 +562,7 @@ class VimeoCrawler(object):
                                 if len(ls) == 1:
                                     self.logger.info("Language not set, setting to %s", ls[0].text)
                                     ls[0].click()
-                                    self.driver.find_element_by_css_selector('#settings_form input[type=submit]').click()
+                                    self.getElement('#settings_form input[type=submit]').click()
                                 else:
                                     self.logger.error("Unsupported language: %s", self.setLanguage)
                                     self.setLanguage = None
@@ -560,9 +572,9 @@ class VimeoCrawler(object):
                             self.logger.warning("Failed to set language to %s", self.setLanguage)
                     if self.setHD:
                         try:
-                            self.driver.find_element_by_css_selector('#tabs a[title="Video File"]').click()
+                            self.getElement('#tabs a[title="Video File"]').click()
                             try:
-                                radio = self.driver.find_element_by_id('hd_profile_1080')
+                                radio = self.getElement('#hd_profile_1080')
                                 if radio.is_selected():
                                     self.logger.info("Video already set to 1080p")
                                 elif not radio.is_enabled():
@@ -570,28 +582,28 @@ class VimeoCrawler(object):
                                 else:
                                     self.logger.info("Setting video to 1080p")
                                     radio.click()
-                                    self.driver.find_element_by_id('upgrade_video').click()
+                                    self.getElement('#upgrade_video').click()
                             except NoSuchElementException:
                                 self.logger.warning("Failed to set video to 1080p")
                         except NoSuchElementException:
                             self.logger.warning("Failed to access Video File settings")
                     if self.setPreset or self.setHD:
                         try:
-                            self.driver.find_element_by_css_selector('#tabs a[title=Embed]').click()
+                            self.getElement('#tabs a[title=Embed]').click()
                             if self.setHD:
                                 try:
-                                    checkbox = self.driver.find_element_by_css_selector('input[name=allow_hd_embed]')
+                                    checkbox = self.getElement('input[name=allow_hd_embed]')
                                     if checkbox.is_selected():
                                         self.logger.info("Embed already set to HD")
                                     else:
                                         self.logger.info("Setting embed to HD")
                                         checkbox.click()
-                                        self.driver.find_element_by_css_selector('#settings_form input[name=save_embed_settings]').click()
+                                        self.getElement('#settings_form input[name=save_embed_settings]').click()
                                 except NoSuchElementException:
                                     self.logger.warning("Failed to set playback to HD")
                             if self.setPreset:
                                 try:
-                                    presets = self.driver.find_elements_by_css_selector("select#preset option")
+                                    presets = self.getElements("select#preset option")
                                     currentPreset = ([p for p in presets if p.is_selected()] or [None,])[0]
                                     if currentPreset and currentPreset.text.capitalize() == self.setPreset:
                                         self.logger.info("Preset is already set to %s", self.setPreset)
@@ -600,7 +612,7 @@ class VimeoCrawler(object):
                                         if presets:
                                             self.logger.info("Preset %s, setting to %s", ('is set to %s' % currentPreset.text.capitalize()) if currentPreset else 'is not set', self.setPreset)
                                             presets[0].click()
-                                            self.driver.find_element_by_css_selector('#settings_form input[name=save_embed_settings]').click()
+                                            self.getElement('#settings_form input[name=save_embed_settings]').click()
                                         else:
                                             self.logger.error("Unknown preset: %s", self.setPreset)
                                             self.setPreset = None
@@ -610,7 +622,11 @@ class VimeoCrawler(object):
                             self.logger.warning("Failed to access Embed settings")
                 except NoSuchElementException:
                     self.logger.warning("Failed to access settings")
-        if link: # Downloading file
+        if not download:
+            self.logger.warning("Download function not available")
+        elif not link:
+            self.logger.error("Can't find download link")
+        else: # Downloading file
             if linkSize:
                 localSize = getFileSize(targetFileName)
                 if localSize == linkSize:
@@ -697,8 +713,6 @@ class VimeoCrawler(object):
                 self.logger.info("OK")
             elif downloadSkip or not self.doDownload:
                 self.logger.info("Downloading SKIPPED")
-        else:
-            self.logger.info("Download ultimately failed")
         # Creating symbolic links, if enabled
         for dirName in (dirName for (dirName, vIDs) in self.folders if vID in vIDs):
             linkFileName = join(dirName, fileName) # unicode
@@ -710,7 +724,7 @@ class VimeoCrawler(object):
             try:
                 (hardlink if self.useHardLinks else symlink)(join('..', fileName), linkFileName)
             except Exception, e:
-                self.logger.warning("Can't create link at %s: %s", encodeForConsole(linkFileName), e)
+                self.logger.error("Can't create link at %s: %s", encodeForConsole(linkFileName), e)
                 self.errors += 1
         self.logger.info("")
 
