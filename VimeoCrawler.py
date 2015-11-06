@@ -86,7 +86,7 @@ except ImportError:
 
 isWindows = platform.lower().startswith('win')
 
-TITLE = 'VimeoCrawler v1.84 (c) 2013-2015 Vasily Zakharov vmzakhar@gmail.com'
+TITLE = 'VimeoCrawler v1.85 (c) 2013-2015 Vasily Zakharov vmzakhar@gmail.com'
 
 OPTION_NAMES = ('directory', 'login', 'max-items', 'retries', 'set-language', 'preset', 'timeout', 'webdriver')
 FIELD_NAMES = ('targetDirectory', 'credentials', 'maxItems', 'retryCount', 'setLanguage', 'setPreset', 'timeout', 'driverName')
@@ -370,24 +370,22 @@ class VimeoCrawler(object):
         return self.driver.find_element_by_css_selector(selector)
 
     def login(self, email, password):
-        for _ in xrange(self.retryCount):
-            self.goTo('http://vimeo.com/log_in')
-            self.logger.info("Logging in as %s...", email)
-            try:
-                self.getElement('#signup_email').send_keys(email)
-                self.getElement('#login_password').send_keys(password)
-                self.getElement('#login_form input[type=submit]').click()
-                welcomeLink = WebDriverWait(self.driver, TIMEOUT).until(elementLocated((By.CSS_SELECTOR, '#page_header h1 a')))
-                userName = welcomeLink.text.strip()
-                self.logger.info("Logged in as %s...", userName)
-                welcomeLink.click()
-                WebDriverWait(self.driver, TIMEOUT).until(elementLocated((By.CSS_SELECTOR, '#content')))
-                self.loggedIn = True
-                self.userName = userName
-                return
-            except NoSuchElementException, e:
-                self.logger.error("Login failed: %s", e.msg)
-        self.errors += 1
+        self.goTo('http://vimeo.com/log_in')
+        self.logger.info("Logging in as %s...", email)
+        try:
+            self.getElement('#signup_email').send_keys(email)
+            self.getElement('#login_password').send_keys(password)
+            self.getElement('#login_form input[type=submit]').click()
+            welcomeLink = WebDriverWait(self.driver, TIMEOUT).until(elementLocated((By.CSS_SELECTOR, '#page_header h1 a')))
+            userName = welcomeLink.text.strip()
+            self.logger.info("Logged in as %s...", userName)
+            welcomeLink.click()
+            WebDriverWait(self.driver, TIMEOUT).until(elementLocated((By.CSS_SELECTOR, '#content')))
+            self.loggedIn = True
+            self.userName = userName
+            return
+        except NoSuchElementException, e:
+            self.logger.error("Login failed: %s", e.msg)
 
     def getItemsFromPage(self):
         self.logger.info("Processing %s", self.driver.current_url)
@@ -451,34 +449,31 @@ class VimeoCrawler(object):
             self.doCreateFolders = self.foldersNeeded
         elif url.isFolder: # Folder
             title = None
-            for i in xrange(self.retryCount + 1):
-                self.goTo(url)
+            self.goTo(url)
+            try:
+                title = self.getElement('#page_header h1 a').text
+            except NoSuchElementException:
                 try:
-                    title = self.getElement('#page_header h1 a').text
+                    title = self.getElement('#page_header h1').text
                 except NoSuchElementException:
                     try:
-                        title = self.getElement('#page_header h1').text
+                        title = self.getElement('#group_header h1 a').get_attribute('title')
                     except NoSuchElementException:
                         try:
-                            title = self.getElement('#group_header h1 a').get_attribute('title')
-                        except NoSuchElementException:
-                            try:
-                                title = self.getElement('#group_header h1 a').text
-                            except NoSuchElementException, e:
-                                self.logger.warning(e.msg)
-                                if i >= self.retryCount:
-                                    self.logger.error("Page load failed")
-                                    self.errors += 1
-                if title:
-                    self.logger.info("Folder: %s", encodeForConsole(title))
-                    if self.doCreateFolders:
-                        dirName = self.createDir(cleanupFileName(title.strip().rstrip('.'))) # unicode
-                        url.createFile(dirName)
-                        if symlink:
-                            target = set()
-                            self.folders.append((dirName, target))
-                    items = self.getItemsFromFolder()
-                    break
+                            title = self.getElement('#group_header h1 a').text
+                        except NoSuchElementException, e:
+                            self.logger.warning(e.msg)
+                            self.logger.error("Page load failed")
+                            self.errors += 1
+            if title:
+                self.logger.info("Folder: %s", encodeForConsole(title))
+                if self.doCreateFolders:
+                    dirName = self.createDir(cleanupFileName(title.strip().rstrip('.'))) # unicode
+                    url.createFile(dirName)
+                    if symlink:
+                        target = set()
+                        self.folders.append((dirName, target))
+                items = self.getItemsFromFolder()
         else: # Some other page
             self.goTo(url)
             items = self.getItemsFromPage()
@@ -486,246 +481,224 @@ class VimeoCrawler(object):
             self.getItemsFromURL(item, target)
 
     def processVideo(self, vID, number):
-        for _attempt in xrange(self.retryCount):
-            title = ''
-            download = None
-            for i in count():
+        title = ''
+        download = None
+        try:
+            self.goTo(vID)
+            title = encodeForConsole(self.getElement('#page_header h1').text.strip().rstrip('.'))
+            try:
+                self.driver.find_element_by_class_name('iconify_down_b').click()
+                download = self.getElement('#download')
+            except NoSuchElementException, e:
+                self.logger.error("Download function not available")
+        except NoSuchElementException, e:
+            self.logger.warning(e.msg)
+            self.logger.error("Page load failed")
+            self.errors += 1
+        # Parse download links
+        link = linkSize = localSize = downloadOK = downloadSkip = None
+        if download:
+            for preference in FILE_PREFERENCES:
                 try:
-                    self.goTo(vID)
-                    title = encodeForConsole(self.getElement('#page_header h1').text.strip().rstrip('.'))
-                    self.driver.find_element_by_class_name('iconify_down_b').click()
-                    download = self.getElement('#download')
+                    link = download.find_element_by_partial_link_text(preference)
                     break
-                except NoSuchElementException, e:
-                    self.logger.warning(e.msg)
-                    if i >= self.retryCount:
-                        self.logger.error("Page load failed")
-                        self.errors += 1
-                        break
-            # Parse download links
-            link = linkSize = localSize = downloadOK = downloadSkip = None
-            if download:
-                for preference in FILE_PREFERENCES:
-                    try:
-                        link = download.find_element_by_partial_link_text(preference)
-                        break
-                    except NoSuchElementException:
-                        pass
-            if link: # Parse chosen download link
-                userAgent = str(self.driver.execute_script('return window.navigator.userAgent'))
-                cookies = self.driver.get_cookies()
-                extension = link.get_attribute('download').split('.')[-1] # unicode
-                description = encodeForConsole('%s/%s' % (link.text, extension.upper()))
-                link = str(link.get_attribute('href'))
-                if self.getFileSizes:
-                    try:
-                        request = requests.get(link, stream = True, headers = { 'user-agent': userAgent }, cookies = dict((str(cookie['name']), str(cookie['value'])) for cookie in cookies))
-                        request.close()
-                        linkSize = int(request.headers['content-length'])
-                        self.totalFileSize += linkSize
-                        description += ', %s' % readableSize(linkSize)
-                    except Exception, e:
-                        self.logger.warning(e)
-            else:
-                description = extension = 'NONE'
-            # Prepare file information
-            prefix = ' '.join((title, '(%s)' % description))
-            suffix = ' '.join((('%d/%d %d%%' % (number, len(self.vIDs), int(number * 100.0 / len(self.vIDs)))),)
-                            + ((readableSize(self.totalFileSize),) if self.totalFileSize else ()))
-            self.logger.info(' '.join((prefix, suffix)))
-            fileName = cleanupFileName('%s.%s' % (' '.join(((title.decode(CONSOLE_ENCODING),) if title else ()) + (str(vID),)), extension.lower())) # unicode
-            targetFileName = encodeForFileSystem(join(self.targetDirectory, fileName))
-            if self.setLanguage or self.setPreset or self.setHD:
-                try:
-                    author = self.driver.find_elements_by_css_selector('#page_header .byline a[rel=author]').text.strip()
                 except NoSuchElementException:
-                    self.logger.error("Failed to identify author")
-                    author = None
-                if author not in (None, self.userName):
-                    self.logger.warning("Video author is %s, skipping adusting settings", author)
-                else: # matching author or unindentified author
-                    try:
-                        self.driver.find_element_by_id('change_settings').click()
-                        if self.setLanguage:
-                            try:
-                                languages = self.driver.find_elements_by_css_selector('select[name=language] option')
-                                currentLanguage = ([l for l in languages if l.is_selected()] or [None,])[0]
-                                if currentLanguage is None or currentLanguage is languages[0]:
-                                    ls = [l for l in languages if l.text.capitalize().startswith(self.setLanguage)]
-                                    if len(ls) != 1:
-                                        ls = [l for l in languages if l.get_attribute('value').capitalize().startswith(self.setLanguage)]
-                                    if len(ls) == 1:
-                                        self.logger.info("Language not set, setting to %s", ls[0].text)
-                                        ls[0].click()
-                                        self.driver.find_element_by_css_selector('#settings_form input[type=submit]').click()
-                                    else:
-                                        self.logger.error("Unsupported language: %s", self.setLanguage)
-                                        self.setLanguage = None
+                    pass
+        if link: # Parse chosen download link
+            userAgent = str(self.driver.execute_script('return window.navigator.userAgent'))
+            cookies = self.driver.get_cookies()
+            extension = link.get_attribute('download').split('.')[-1] # unicode
+            description = encodeForConsole('%s/%s' % (link.text, extension.upper()))
+            link = str(link.get_attribute('href'))
+            if self.getFileSizes:
+                try:
+                    request = requests.get(link, stream = True, headers = { 'user-agent': userAgent }, cookies = dict((str(cookie['name']), str(cookie['value'])) for cookie in cookies))
+                    request.close()
+                    linkSize = int(request.headers['content-length'])
+                    self.totalFileSize += linkSize
+                    description += ', %s' % readableSize(linkSize)
+                except Exception, e:
+                    self.logger.warning(e)
+        else:
+            description = extension = 'NONE'
+        # Prepare file information
+        prefix = ' '.join((title, '(%s)' % description))
+        suffix = ' '.join((('%d/%d %d%%' % (number, len(self.vIDs), int(number * 100.0 / len(self.vIDs)))),)
+                        + ((readableSize(self.totalFileSize),) if self.totalFileSize else ()))
+        self.logger.info(' '.join((prefix, suffix)))
+        fileName = cleanupFileName('%s.%s' % (' '.join(((title.decode(CONSOLE_ENCODING),) if title else ()) + (str(vID),)), extension.lower())) # unicode
+        targetFileName = encodeForFileSystem(join(self.targetDirectory, fileName))
+        if self.setLanguage or self.setPreset or self.setHD:
+            try:
+                author = self.driver.find_element_by_css_selector('#page_header .byline a[rel=author]').text.strip()
+            except NoSuchElementException:
+                self.logger.error("Failed to identify author")
+                author = None
+            if author not in (None, self.userName):
+                self.logger.warning("Video author is %s, skipping adusting settings", author)
+            else: # matching author or unindentified author
+                try:
+                    self.driver.find_element_by_id('change_settings').click()
+                    if self.setLanguage:
+                        try:
+                            languages = self.driver.find_elements_by_css_selector('select[name=language] option')
+                            currentLanguage = ([l for l in languages if l.is_selected()] or [None,])[0]
+                            if currentLanguage is None or currentLanguage is languages[0]:
+                                ls = [l for l in languages if l.text.capitalize().startswith(self.setLanguage)]
+                                if len(ls) != 1:
+                                    ls = [l for l in languages if l.get_attribute('value').capitalize().startswith(self.setLanguage)]
+                                if len(ls) == 1:
+                                    self.logger.info("Language not set, setting to %s", ls[0].text)
+                                    ls[0].click()
+                                    self.driver.find_element_by_css_selector('#settings_form input[type=submit]').click()
                                 else:
-                                    self.logger.info("Language is already set to %s / %s", currentLanguage.get_attribute('value').upper(), currentLanguage.text)
-                            except NoSuchElementException:
-                                self.logger.warning("Failed to set language to %s", self.setLanguage)
-                        if self.setHD:
-                            try:
-                                self.driver.find_element_by_css_selector('#tabs a[title="Video File"]').click()
-                                try:
-                                    for i in xrange(self.retryCount):
-                                        try:
-                                            radio = self.driver.find_element_by_id('hd_profile_1080')
-                                            break
-                                        except NoSuchElementException, e:
-                                            if i == self.retryCount - 1:
-                                                raise
-                                    if radio.is_selected():
-                                        self.logger.info("Video already set to 1080p")
-                                    elif not radio.is_enabled():
-                                        self.logger.info("Video cannot be set to 1080p")
-                                    else:
-                                        self.logger.info("Setting video to 1080p")
-                                        radio.click()
-                                        self.driver.find_element_by_id('upgrade_video').click()
-                                except NoSuchElementException:
-                                    self.logger.warning("Failed to set video to 1080p")
-                            except NoSuchElementException:
-                                self.logger.warning("Failed to access Video File settings")
-                        if self.setPreset or self.setHD:
-                            try:
-                                self.driver.find_element_by_css_selector('#tabs a[title=Embed]').click()
-                                if self.setHD:
-                                    try:
-                                        for i in xrange(self.retryCount):
-                                            try:
-                                                checkbox = self.driver.find_element_by_css_selector('input[name=allow_hd_embed]')
-                                                break
-                                            except NoSuchElementException, e:
-                                                if i == self.retryCount - 1:
-                                                    raise
-                                        if checkbox.is_selected():
-                                            self.logger.info("Embed already set to HD")
-                                        else:
-                                            self.logger.info("Setting embed to HD")
-                                            checkbox.click()
-                                            self.driver.find_element_by_css_selector('#settings_form input[name=save_embed_settings]').click()
-                                    except NoSuchElementException:
-                                        self.logger.warning("Failed to set playback to HD")
-                                if self.setPreset:
-                                    try:
-                                        for i in xrange(self.retryCount):
-                                            try:
-                                                presets = self.driver.find_elements_by_css_selector("select#preset option")
-                                                break
-                                            except NoSuchElementException, e:
-                                                if i == self.retryCount - 1:
-                                                    raise
-                                        currentPreset = ([p for p in presets if p.is_selected()] or [None,])[0]
-                                        if currentPreset and currentPreset.text.capitalize() == self.setPreset:
-                                            self.logger.info("Preset is already set to %s", self.setPreset)
-                                        else:
-                                            presets = [p for p in presets if p.text.capitalize() == self.setPreset]
-                                            if presets:
-                                                self.logger.info("Preset %s, setting to %s", ('is set to %s' % currentPreset.text.capitalize()) if currentPreset else 'is not set', self.setPreset)
-                                                presets[0].click()
-                                                self.driver.find_element_by_css_selector('#settings_form input[name=save_embed_settings]').click()
-                                            else:
-                                                self.logger.error("Unknown preset: %s", self.setPreset)
-                                                self.setPreset = None
-                                    except NoSuchElementException:
-                                        self.logger.warning("Failed to set preset to %s", self.setPreset)
-                            except NoSuchElementException:
-                                self.logger.warning("Failed to access Embed settings")
-                    except NoSuchElementException:
-                        self.logger.warning("Failed to access settings")
-            if link: # Downloading file
-                if linkSize:
-                    localSize = getFileSize(targetFileName)
-                    if localSize == linkSize:
-                        downloadOK = True
-                    elif localSize > linkSize:
-                        self.errors += 1
-                        self.logger.error("Local file is larger (%d) than remote file (%d)", localSize, linkSize)
-                        downloadSkip = True
-                        #remove(targetFileName)
-                        #localSize = None
-                if self.doDownload and not downloadSkip and not downloadOK:
-                    timeout = self.timeout
-                    class ProgressIndicator(object):
-                        QUANTUM = 10 * 1024 * 1024 # 10 megabytes
-                        ACTION = r'--\\||//' # update() often gets called in pairs, this smoothes things up
-                        action = len(ACTION) - 1
-
-                        def progress(self, s, suffix = ''):
-                            self.action = (self.action + 1) % len(self.ACTION)
-                            stdout.write('\b%s%s' % (s, suffix + '\n' if suffix else self.ACTION[self.action]))
-
-                        def start(self, *_args, **kwargs):
-                            self.length = kwargs.get('length') or kwargs.get('size')
-                            self.started = False
-                            self.totalRead = 0
-                            self.lastData = time()
-                            self.count = 0
-                            self.action = len(self.ACTION) - 1
-                            self.progress("Dowloading: ")
-
-                        def update(self, totalRead, suffix = ''):
-                            if totalRead == 0:
-                                self.started = True
-                            elif totalRead <= self.totalRead:
-                                if time() > self.lastData + timeout: # pylint: disable=W0640
-                                    raise URLGrabError("Download seems stalled")
+                                    self.logger.error("Unsupported language: %s", self.setLanguage)
+                                    self.setLanguage = None
                             else:
-                                self.totalRead = totalRead
-                                self.lastData = time()
-                            oldCount = self.count
-                            self.count = int(totalRead // self.QUANTUM) + 1
-                            self.progress(('=' if self.started else '+') * max(0, self.count - oldCount), suffix)
+                                self.logger.info("Language is already set to %s / %s", currentLanguage.get_attribute('value').upper(), currentLanguage.text)
+                        except NoSuchElementException:
+                            self.logger.warning("Failed to set language to %s", self.setLanguage)
+                    if self.setHD:
+                        try:
+                            self.driver.find_element_by_css_selector('#tabs a[title="Video File"]').click()
+                            try:
+                                radio = self.driver.find_element_by_id('hd_profile_1080')
+                                if radio.is_selected():
+                                    self.logger.info("Video already set to 1080p")
+                                elif not radio.is_enabled():
+                                    self.logger.info("Video cannot be set to 1080p")
+                                else:
+                                    self.logger.info("Setting video to 1080p")
+                                    radio.click()
+                                    self.driver.find_element_by_id('upgrade_video').click()
+                            except NoSuchElementException:
+                                self.logger.warning("Failed to set video to 1080p")
+                        except NoSuchElementException:
+                            self.logger.warning("Failed to access Video File settings")
+                    if self.setPreset or self.setHD:
+                        try:
+                            self.driver.find_element_by_css_selector('#tabs a[title=Embed]').click()
+                            if self.setHD:
+                                try:
+                                    checkbox = self.driver.find_element_by_css_selector('input[name=allow_hd_embed]')
+                                    if checkbox.is_selected():
+                                        self.logger.info("Embed already set to HD")
+                                    else:
+                                        self.logger.info("Setting embed to HD")
+                                        checkbox.click()
+                                        self.driver.find_element_by_css_selector('#settings_form input[name=save_embed_settings]').click()
+                                except NoSuchElementException:
+                                    self.logger.warning("Failed to set playback to HD")
+                            if self.setPreset:
+                                try:
+                                    presets = self.driver.find_elements_by_css_selector("select#preset option")
+                                    currentPreset = ([p for p in presets if p.is_selected()] or [None,])[0]
+                                    if currentPreset and currentPreset.text.capitalize() == self.setPreset:
+                                        self.logger.info("Preset is already set to %s", self.setPreset)
+                                    else:
+                                        presets = [p for p in presets if p.text.capitalize() == self.setPreset]
+                                        if presets:
+                                            self.logger.info("Preset %s, setting to %s", ('is set to %s' % currentPreset.text.capitalize()) if currentPreset else 'is not set', self.setPreset)
+                                            presets[0].click()
+                                            self.driver.find_element_by_css_selector('#settings_form input[name=save_embed_settings]').click()
+                                        else:
+                                            self.logger.error("Unknown preset: %s", self.setPreset)
+                                            self.setPreset = None
+                                except NoSuchElementException:
+                                    self.logger.warning("Failed to set preset to %s", self.setPreset)
+                        except NoSuchElementException:
+                            self.logger.warning("Failed to access Embed settings")
+                except NoSuchElementException:
+                    self.logger.warning("Failed to access settings")
+        if link: # Downloading file
+            if linkSize:
+                localSize = getFileSize(targetFileName)
+                if localSize == linkSize:
+                    downloadOK = True
+                elif localSize > linkSize:
+                    self.errors += 1
+                    self.logger.error("Local file is larger (%d) than remote file (%d)", localSize, linkSize)
+                    downloadSkip = True
+                    #remove(targetFileName)
+                    #localSize = None
+            if self.doDownload and not downloadSkip and not downloadOK:
+                timeout = self.timeout
+                class ProgressIndicator(object):
+                    QUANTUM = 10 * 1024 * 1024 # 10 megabytes
+                    ACTION = r'--\\||//' # update() often gets called in pairs, this smoothes things up
+                    action = len(ACTION) - 1
+
+                    def progress(self, s, suffix = ''):
+                        self.action = (self.action + 1) % len(self.ACTION)
+                        stdout.write('\b%s%s' % (s, suffix + '\n' if suffix else self.ACTION[self.action]))
+
+                    def start(self, *_args, **kwargs):
+                        self.length = kwargs.get('length') or kwargs.get('size')
+                        self.started = False
+                        self.totalRead = 0
+                        self.lastData = time()
+                        self.count = 0
+                        self.action = len(self.ACTION) - 1
+                        self.progress("Dowloading: ")
+
+                    def update(self, totalRead, suffix = ''):
+                        if totalRead == 0:
                             self.started = True
+                        elif totalRead <= self.totalRead:
+                            if time() > self.lastData + timeout: # pylint: disable=W0640
+                                raise URLGrabError("Download seems stalled")
+                        else:
+                            self.totalRead = totalRead
+                            self.lastData = time()
+                        oldCount = self.count
+                        self.count = int(totalRead // self.QUANTUM) + 1
+                        self.progress(('=' if self.started else '+') * max(0, self.count - oldCount), suffix)
+                        self.started = True
 
-                        def end(self, totalRead):
-                            self.update(totalRead, 'OK')
+                    def end(self, totalRead):
+                        self.update(totalRead, 'OK')
 
-                    progressIndicator = ProgressIndicator()
-                    grabber = URLGrabber(reget = 'simple', timeout = self.timeout, progress_obj = progressIndicator,
-                        user_agent = userAgent, http_headers = tuple((str(cookie['name']), str(cookie['value'])) for cookie in cookies))
-                    try:
-                        grabber.urlgrab(link, filename = targetFileName)
-                        downloadOK = True
-                    except URLGrabError, e:
+                progressIndicator = ProgressIndicator()
+                grabber = URLGrabber(reget = 'simple', timeout = self.timeout, progress_obj = progressIndicator,
+                    user_agent = userAgent, http_headers = tuple((str(cookie['name']), str(cookie['value'])) for cookie in cookies))
+                try:
+                    grabber.urlgrab(link, filename = targetFileName)
+                    downloadOK = True
+                except URLGrabError, e:
+                    self.errors += 1
+                    self.logger.error("Download failed: %s", e)
+                except KeyboardInterrupt:
+                    self.errors += 1
+                    self.logger.error("Download interrupted")
+                if downloadOK:
+                    localSize = getFileSize(targetFileName)
+                    if not localSize:
                         self.errors += 1
-                        self.logger.error("Download failed: %s", e)
-                    except KeyboardInterrupt:
-                        self.errors += 1
-                        self.logger.error("Download interrupted")
-                    if downloadOK:
-                        localSize = getFileSize(targetFileName)
-                        if not localSize:
+                        downloadOK = False
+                        self.logger.error("Downloaded file seems corrupt")
+                    elif linkSize:
+                        if localSize > linkSize:
                             self.errors += 1
                             downloadOK = False
-                            self.logger.error("Downloaded file seems corrupt")
-                        elif linkSize:
-                            if localSize > linkSize:
-                                self.errors += 1
-                                downloadOK = False
-                                self.logger.error("Downloaded file larger (%d) than remote file (%d)", localSize, linkSize)
-                            elif localSize < linkSize:
-                                self.errors += 1
-                                downloadOK = False
-                                self.logger.error("Downloaded file smaller (%d) than remote file (%d)", localSize, linkSize)
-                            elif self.verifyContent: # Verifying downloaded file
-                                self.logger.info("Verifying...")
-                                subprocess = Popen('ffmpeg -v error -i "%s" -f null -' % targetFileName, shell = True, stdout = PIPE, stderr = STDOUT)
-                                output = subprocess.communicate()[0]
-                                if subprocess.returncode:
-                                    self.logger.warning("Verification failed, code %d", subprocess.returncode)
-                                elif output:
-                                    self.logger.error("Verification ERROR: %s", '\n'.join([s for s in output.splitlines() if "Last message repeated" not in s][-4:]))
-                if downloadOK:
-                    self.logger.info("OK")
-                    break
-                elif downloadSkip or not self.doDownload:
-                    self.logger.info("Downloading SKIPPED")
-                    break
+                            self.logger.error("Downloaded file larger (%d) than remote file (%d)", localSize, linkSize)
+                        elif localSize < linkSize:
+                            self.errors += 1
+                            downloadOK = False
+                            self.logger.error("Downloaded file smaller (%d) than remote file (%d)", localSize, linkSize)
+                        elif self.verifyContent: # Verifying downloaded file
+                            self.logger.info("Verifying...")
+                            subprocess = Popen('ffmpeg -v error -i "%s" -f null -' % targetFileName, shell = True, stdout = PIPE, stderr = STDOUT)
+                            output = subprocess.communicate()[0]
+                            if subprocess.returncode:
+                                self.logger.warning("Verification failed, code %d", subprocess.returncode)
+                            elif output:
+                                self.logger.error("Verification ERROR: %s", '\n'.join([s for s in output.splitlines() if "Last message repeated" not in s][-4:]))
+            if downloadOK:
+                self.logger.info("OK")
+            elif downloadSkip or not self.doDownload:
+                self.logger.info("Downloading SKIPPED")
         else:
-            self.logger.info("Download ultimately failed after %d retries", self.retryCount)
+            self.logger.info("Download ultimately failed")
         # Creating symbolic links, if enabled
         for dirName in (dirName for (dirName, vIDs) in self.folders if vID in vIDs):
             linkFileName = join(dirName, fileName) # unicode
