@@ -83,7 +83,7 @@ except ImportError:
 
 isWindows = platform.lower().startswith('win')
 
-TITLE = 'VimeoCrawler v1.87 (c) 2013-2015 Vasily Zakharov vmzakhar@gmail.com'
+TITLE = 'VimeoCrawler v1.88 (c) 2013-2015 Vasily Zakharov vmzakhar@gmail.com'
 
 OPTION_NAMES = ('directory', 'login', 'max-items', 'retries', 'set-language', 'preset', 'timeout', 'webdriver')
 FIELD_NAMES = ('targetDirectory', 'credentials', 'maxItems', 'retryCount', 'setLanguage', 'setPreset', 'timeout', 'driverName')
@@ -147,7 +147,7 @@ CATEGORIES_LINKS = ('albums', 'groups', 'channels') # http://vimeo.com/account/c
 VIDEOS_LINKS = ('videos') # http://vimeo.com/account/videos
 FOLDERS_LINKS = ('album', 'groups', 'channels') # http://vimeo.com/folder/*
 FOLDER_NAMES = {'albums': 'album', 'groups': 'group', 'channels': 'channel'} # Mapping to singular for printing
-FILE_PREFERENCES = ('Original', 'On2 HD', 'On2 SD', 'HD', 'SD') # Vimeo file versions names
+FILE_PREFERENCES = ('Original', '1080p', '720p', 'HD', 'SD') # Vimeo file versions names
 
 UNITS = ('bytes', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB')
 def readableSize(size):
@@ -346,15 +346,19 @@ class VimeoCrawler(object):
             self.logger.setLevel(DEBUG if self.verbose else INFO)
             self.logger.info(TITLE)
             if self.verifyContent:
-                self.logger.info("Enabling content verification, checking for ffmpeg...")
+                self.logger.debug("Enabling content verification, checking for ffmpeg...")
                 subprocess = Popen('ffmpeg', shell = True, stdout = PIPE, stderr = STDOUT)
                 if subprocess.returncode:
-                    self.logger.error("FAILED (code %d), content verification NOT enabled", subprocess.returncode)
+                    self.error("ffmpeg check FAILED (code %d), content verification NOT enabled", subprocess.returncode)
                     self.verifyContent = self.verifyExisting = False
                 else:
-                    self.logger.info("OK")
+                    self.logger.debug("OK")
         except Exception, e:
             usage("ERROR: %s" % e)
+
+    def error(self, *args, **kwargs):
+        self.errors += 1
+        self.logger.error(*args, **kwargs)
 
     def createDir(self, dirName = None):
         dirName = join(self.targetDirectory, dirName) if dirName else self.targetDirectory
@@ -364,7 +368,7 @@ class VimeoCrawler(object):
 
     def goTo(self, url):
         url = URL(url)
-        self.logger.info("Going to %s", url)
+        self.logger.debug("Going to %s", url)
         self.driver.get(url.url)
 
     def getElement(self, selector, fast = False, multiple = False):
@@ -396,26 +400,25 @@ class VimeoCrawler(object):
             self.userName = userName
             return
         except NoSuchElementException, e:
-            self.logger.error("Login failed: %s", e.msg)
+            self.error("Login failed: %s", e)
 
     def getItemsFromPage(self):
-        self.logger.info("Processing %s", self.driver.current_url)
+        self.logger.debug("Processing %s", self.driver.current_url)
         try:
             links = self.getElements('#browse_content .browse a')
             links = (link.get_attribute('href') for link in links)
             items = tuple(URL(link) for link in links if VIMEO in link and not link.endswith('settings'))[:self.maxItems]
         except NoSuchElementException, e:
-            self.logger.error(e.msg)
-            self.errors += 1
+            self.error(e)
             items = ()
         numVideos = len(tuple(item for item in items if item.isVideo))
         if numVideos:
             if numVideos == len(items):
-                self.logger.info("Got %d videos", numVideos)
+                self.logger.debug("Got %d videos", numVideos)
             else:
-                self.logger.info("Got %d videos and %d other items", numVideos, len(items) - numVideos)
+                self.logger.debug("Got %d videos and %d other items", numVideos, len(items) - numVideos)
         else:
-            self.logger.info("Got %d items", len(items))
+            self.logger.debug("Got %d items", len(items))
         assert len(items) == len(set(items))
         return items
 
@@ -432,7 +435,7 @@ class VimeoCrawler(object):
         items = tuple(items)
         assert len(items) == len(set(items))
         if numPages > 1:
-            self.logger.info("Got total of %d items", len(items))
+            self.logger.debug("Got total of %d items", len(items))
         return items
 
     def getItemsFromURL(self, url = None, target = None):
@@ -473,9 +476,7 @@ class VimeoCrawler(object):
                         try:
                             title = self.getElement('#group_header h1 a').text
                         except NoSuchElementException, e:
-                            self.logger.warning(e.msg)
-                            self.logger.error("Page load failed")
-                            self.errors += 1
+                            self.logger.error(e)
             if title:
                 self.logger.info("Folder: %s", encodeForConsole(title))
                 if self.doCreateFolders:
@@ -492,14 +493,14 @@ class VimeoCrawler(object):
             self.getItemsFromURL(item, target)
 
     def verifyFile(self, fileName):
-        self.logger.info("Verifying...")
+        self.logger.debug("Verifying...")
         subprocess = Popen('ffmpeg -v error -i "%s" -f null -' % fileName, shell = True, stdout = PIPE, stderr = STDOUT)
         output = subprocess.communicate()[0]
         if subprocess.returncode:
-            self.logger.error("Verification failed, code %d", subprocess.returncode)
+            self.error("Verification failed, code %d", subprocess.returncode)
             return False
-        elif output:
-            self.logger.error("Verification ERROR: %s", '\n'.join([s for s in output.splitlines() if "Last message repeated" not in s][-4:]))
+        if output:
+            self.logger.warning("Verification issue: %s", '\n'.join([s for s in output.splitlines() if "Last message repeated" not in s][-4:]))
             return False
         return True
 
@@ -515,9 +516,7 @@ class VimeoCrawler(object):
             except NoSuchElementException, e:
                 pass
         except NoSuchElementException, e:
-            self.logger.warning(e.msg)
-            self.logger.error("Page load failed")
-            self.errors += 1
+            self.error(e)
         # Parse download links
         link = linkSize = localSize = downloadOK = downloadSkip = None
         if download:
@@ -545,26 +544,23 @@ class VimeoCrawler(object):
                     self.totalFileSize += linkSize
                     description += ', %s' % readableSize(linkSize)
                 except Exception, e:
-                    self.logger.warning(e)
+                    self.error("Error getting remote file size: %s", e)
         else:
             description = extension = 'NONE'
+        try: # Check if video is private
+            self.getElement('.private')
+            isPrivate = True
+        except NoSuchElementException:
+            isPrivate = False
         # Prepare file information
-        prefix = ' '.join((title, '(%s)' % description))
-        suffix = ' '.join((('%d/%d %d%%' % (number, len(self.vIDs), int(number * 100.0 / len(self.vIDs)))),)
-                        + ((readableSize(self.totalFileSize),) if self.totalFileSize else ()))
-        self.logger.info(' '.join((prefix, suffix)))
+        self.logger.info('%s%s (%s) %d/%d %d%%%s', title, ' [PRIVATE]' if isPrivate else '', description, number, len(self.vIDs), int(number * 100.0 / len(self.vIDs)), (' %s' % readableSize(self.totalFileSize)) if self.totalFileSize else '')
         fileName = cleanupFileName('%s.%s' % (' '.join(((title.decode(CONSOLE_ENCODING),) if title else ()) + (str(vID),)), extension.lower())) # unicode
         targetFileName = encodeForFileSystem(join(self.targetDirectory, fileName))
-        try:
-            self.getElement('.private')
-            self.logger.warning("This video is PRIVATE")
-        except NoSuchElementException:
-            pass
         if self.setLanguage or self.setPreset or self.setHD:
             try:
                 author = self.getElement('#page_header .byline a[rel=author]').text.strip()
             except NoSuchElementException:
-                self.logger.error("Failed to identify author")
+                self.error("Failed to identify author")
                 author = None
             if author not in (None, self.userName):
                 self.logger.warning("Video author is %s, skipping settings", author)
@@ -580,33 +576,33 @@ class VimeoCrawler(object):
                                 if len(ls) != 1:
                                     ls = [l for l in languages if l.get_attribute('value').capitalize().startswith(self.setLanguage)]
                                 if len(ls) == 1:
-                                    self.logger.info("Language not set, setting to %s", ls[0].text)
+                                    self.logger.debug("Language not set, setting to %s", ls[0].text)
                                     ls[0].click()
                                     self.getElement('#settings_form input[type=submit]').click()
                                 else:
-                                    self.logger.error("Unsupported language: %s", self.setLanguage)
+                                    self.error("Unsupported language: %s", self.setLanguage)
                                     self.setLanguage = None
                             else:
-                                self.logger.info("Language is already set to %s / %s", currentLanguage.get_attribute('value').upper(), currentLanguage.text)
+                                self.logger.debug("Language is already set to %s / %s", currentLanguage.get_attribute('value').upper(), currentLanguage.text)
                         except NoSuchElementException:
-                            self.logger.warning("Failed to set language to %s", self.setLanguage)
+                            self.error("Failed to set language to %s", self.setLanguage)
                     if self.setHD:
                         try:
                             self.getElement('#tabs a[title="Video File"]').click()
                             try:
                                 radio = self.getElement('#hd_profile_1080')
                                 if radio.is_selected():
-                                    self.logger.info("Video already set to 1080p")
+                                    self.logger.debug("Video already set to 1080p")
                                 elif not radio.is_enabled():
-                                    self.logger.info("Video cannot be set to 1080p")
+                                    self.logger.debug("Video cannot be set to 1080p")
                                 else:
-                                    self.logger.info("Setting video to 1080p")
+                                    self.logger.debug("Setting video to 1080p")
                                     radio.click()
                                     self.getElement('#upgrade_video').click()
                             except NoSuchElementException:
-                                self.logger.warning("Failed to set video to 1080p")
+                                self.error("Failed to set video to 1080p")
                         except NoSuchElementException:
-                            self.logger.warning("Failed to access Video File settings")
+                            self.error("Failed to access Video File settings")
                     if self.setPreset or self.setHD:
                         try:
                             self.getElement('#tabs a[title=Embed]').click()
@@ -614,38 +610,38 @@ class VimeoCrawler(object):
                                 try:
                                     checkbox = self.getElement('input[name=allow_hd_embed]')
                                     if checkbox.is_selected():
-                                        self.logger.info("Embed already set to HD")
+                                        self.logger.debug("Embed already set to HD")
                                     else:
-                                        self.logger.info("Setting embed to HD")
+                                        self.logger.debug("Setting embed to HD")
                                         checkbox.click()
                                         self.getElement('#settings_form input[name=save_embed_settings]').click()
                                 except NoSuchElementException:
-                                    self.logger.warning("Failed to set playback to HD")
+                                    self.error("Failed to set playback to HD")
                             if self.setPreset:
                                 try:
                                     presets = self.getElements("select#preset option")
                                     currentPreset = ([p for p in presets if p.is_selected()] or [None,])[0]
                                     if currentPreset and currentPreset.text.capitalize() == self.setPreset:
-                                        self.logger.info("Preset is already set to %s", self.setPreset)
+                                        self.logger.debug("Preset is already set to %s", self.setPreset)
                                     else:
                                         presets = [p for p in presets if p.text.capitalize() == self.setPreset]
                                         if presets:
-                                            self.logger.info("Preset %s, setting to %s", ('is set to %s' % currentPreset.text.capitalize()) if currentPreset else 'is not set', self.setPreset)
+                                            self.logger.debug("Preset %s, setting to %s", ('is set to %s' % currentPreset.text.capitalize()) if currentPreset else 'is not set', self.setPreset)
                                             presets[0].click()
                                             self.getElement('#settings_form input[name=save_embed_settings]').click()
                                         else:
-                                            self.logger.error("Unknown preset: %s", self.setPreset)
+                                            self.error("Unknown preset: %s", self.setPreset)
                                             self.setPreset = None
                                 except NoSuchElementException:
-                                    self.logger.warning("Failed to set preset to %s", self.setPreset)
+                                    self.error("Failed to set preset to %s", self.setPreset)
                         except NoSuchElementException:
-                            self.logger.warning("Failed to access Embed settings")
+                            self.error("Failed to access Embed settings")
                 except NoSuchElementException:
-                    self.logger.warning("Failed to access settings")
+                    self.error("Failed to access settings")
         if not download:
             self.logger.warning("Download function not available")
         elif not link:
-            self.logger.error("Can't find download link")
+            self.error("Failed to obtain download link")
         else: # Downloading file
             if linkSize:
                 localSize = getFileSize(targetFileName)
@@ -653,11 +649,9 @@ class VimeoCrawler(object):
                     downloadOK = True
                 elif localSize > linkSize:
                     downloadSkip = True
-                    self.errors += 1
-                    self.logger.error("Local file is larger (%d) than remote file (%d)", localSize, linkSize)
+                    self.error("Local file is larger (%d) than remote file (%d)", localSize, linkSize)
             if downloadOK or downloadSkip:
                 if self.verifyExisting and not self.verifyFile(targetFileName):
-                    self.errors += 1
                     downloadOK = False
             elif self.doDownload:
                 timeout = self.timeout
@@ -703,33 +697,27 @@ class VimeoCrawler(object):
                     grabber.urlgrab(link, filename = targetFileName)
                     downloadOK = True
                 except URLGrabError, e:
-                    self.logger.error("Download failed: %s", e)
-                    self.errors += 1
+                    self.error("Download failed: %s", e)
                 except KeyboardInterrupt:
-                    self.logger.error("Download interrupted")
-                    self.errors += 1
+                    self.error("Download interrupted")
                 if downloadOK:
                     localSize = getFileSize(targetFileName)
                     if not localSize:
-                        self.logger.error("Downloaded file seems corrupt")
-                        self.errors += 1
+                        self.error("Downloaded file seems corrupt")
                         downloadOK = False
                     elif linkSize:
                         if localSize > linkSize:
-                            self.logger.error("Downloaded file larger (%d) than remote file (%d)", localSize, linkSize)
-                            self.errors += 1
+                            self.error("Downloaded file larger (%d) than remote file (%d)", localSize, linkSize)
                             downloadOK = False
                         elif localSize < linkSize:
-                            self.logger.error("Downloaded file smaller (%d) than remote file (%d)", localSize, linkSize)
-                            self.errors += 1
+                            self.error("Downloaded file smaller (%d) than remote file (%d)", localSize, linkSize)
                             downloadOK = False
                         elif self.verifyContent and not self.verifyFile(targetFileName):
-                            self.errors += 1
                             downloadOK = False
             if downloadOK:
-                self.logger.info("OK")
+                self.logger.debug("OK")
             elif downloadSkip or not self.doDownload:
-                self.logger.info("Downloading SKIPPED")
+                self.logger.debug("Download SKIPPED")
         # Creating symbolic links, if enabled
         for dirName in (dirName for (dirName, vIDs) in self.folders if vID in vIDs):
             linkFileName = join(dirName, fileName) # unicode
@@ -741,9 +729,8 @@ class VimeoCrawler(object):
             try:
                 (hardlink if self.useHardLinks else symlink)(join('..', fileName), linkFileName)
             except Exception, e:
-                self.logger.error("Can't create link at %s: %s", encodeForConsole(linkFileName), e)
-                self.errors += 1
-        self.logger.info("")
+                self.error("Can't create link at %s: %s", encodeForConsole(linkFileName), e)
+        self.logger.debug("")
 
     def checkForObsoletes(self):
         self.logger.info("Checking for obsolete files...")
@@ -763,12 +750,12 @@ class VimeoCrawler(object):
             assert fileNames
             if self.detectObsolete and vID not in self.vIDs:
                 for (fileName, fullName) in fileNames:
-                    self.logger.info("Unknown vID file detected: %s", encodeForConsole(fileName))
+                    self.logger.warning("Unknown vID file detected: %s", encodeForConsole(fileName))
                 continue
             if len(fileNames) == 1:
                 continue
             for (fileName, fullName) in sorted(fileNames, key = lambda (fileName, fullName): (getsize(fullName), getmtime(fullName)))[:-1]:
-                self.logger.info("Duplicate vID file detected: %s", encodeForConsole(fileName))
+                self.logger.warning("Duplicate vID file detected: %s", encodeForConsole(fileName))
         self.logger.info("Done")
 
     def run(self):
@@ -797,8 +784,7 @@ class VimeoCrawler(object):
                 for (n, vID) in enumerate(sorted(self.vIDs, reverse = True), 1):
                     self.processVideo(vID, n)
         except Exception, e:
-            self.logger.error(format_exc() if self.verbose else e)
-            self.errors += 1
+            self.error(format_exc() if self.verbose else e)
         finally:
             if self.driver:
                 self.driver.close()
