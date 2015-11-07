@@ -83,7 +83,7 @@ except ImportError:
 
 isWindows = platform.lower().startswith('win')
 
-TITLE = 'VimeoCrawler v1.88 (c) 2013-2015 Vasily Zakharov vmzakhar@gmail.com'
+TITLE = 'VimeoCrawler v1.89 (c) 2013-2015 Vasily Zakharov vmzakhar@gmail.com'
 
 OPTION_NAMES = ('directory', 'login', 'max-items', 'retries', 'set-language', 'preset', 'timeout', 'webdriver')
 FIELD_NAMES = ('targetDirectory', 'credentials', 'maxItems', 'retryCount', 'setLanguage', 'setPreset', 'timeout', 'driverName')
@@ -115,7 +115,7 @@ Options:
 -d --directory - Target directory to save all the output files to, default is the current directory.
 
 -w --webdriver - Selenium WebDriver to use for crawling, default is Firefox.
--t --timeout - Download attempt timeout, default is 60 seconds.
+-t --timeout - Download attempt timeout, default is 10 seconds.
 -r --retries - Number of page download retry attempts, default is 3.
 -m --max-items - Maximum number of items (videos or folders) to retrieve from one page (usable for testing), default is none.
 -s --set-language - Try to set the specified language on all crawled videos.
@@ -204,11 +204,11 @@ class URL(object):
         self.isCategory = len(tokens) == 2 and tokens[1] in CATEGORIES_LINKS
         self.isVideos   = len(tokens) == 2 and tokens[1] in VIDEOS_LINKS
         self.isFolder   = len(tokens) == 2 and tokens[0] in FOLDERS_LINKS
-        self.vID = int(tokens[0]) if self.isVideo else None
-        self.account   = tokens[0]  if self.isAccount or self.isCategory or self.isVideos else None
-        self.category  = tokens[1]  if self.isCategory or self.isVideos else None
-        self.folder    = tokens[0]  if self.isFolder else None
-        self.name      = tokens[1]  if self.isFolder else self.account if self.isAccount else self.category if self.isCategory or self.isVideos else None
+        self.vID        = int(tokens[0]) if self.isVideo else None
+        self.account    = tokens[0] if self.isAccount or self.isCategory or self.isVideos else None
+        self.category   = tokens[1] if self.isCategory or self.isVideos else None
+        self.folder     = tokens[0] if self.isFolder else None
+        self.name       = tokens[1] if self.isFolder else self.account if self.isAccount else self.category if self.isCategory or self.isVideos else None
         if self.isFolder and self.folder != 'album' and not self.url.endswith('videos'):
             self.url += '/videos'
 
@@ -236,7 +236,6 @@ class VimeoCrawler(object):
         self.foldersNeeded = True
         self.getFileSizes = bool(requests)
         self.useHardLinks = False
-        self.setPreset = False
         self.setHD = False
         self.verifyContent = False
         self.verifyExisting = False
@@ -252,6 +251,7 @@ class VimeoCrawler(object):
         self.retryCount = 3
         self.maxItems = None
         self.setLanguage = None
+        self.setPreset = None
         self.startURL = None
         try:
             # Reading command line options
@@ -337,13 +337,14 @@ class VimeoCrawler(object):
                 formatter = Formatter("%(asctime)s %(levelname)s %(message)s", '%Y-%m-%d %H:%M:%S')
                 streamHandler = StreamHandler()
                 streamHandler.setFormatter(formatter)
-                fileHandler = FileHandler(join(self.targetDirectory, LOG_FILE_NAME), mode = 'w')
+                fileHandler = FileHandler(join(self.targetDirectory, LOG_FILE_NAME))
                 fileHandler.setFormatter(formatter)
                 rootLogger.addHandler(streamHandler)
                 rootLogger.addHandler(fileHandler)
-            rootLogger.setLevel(DEBUG if self.verbose else WARNING)
+            #rootLogger.setLevel(INFO if self.verbose else WARNING)
             self.logger = getLogger('vimeo')
             self.logger.setLevel(DEBUG if self.verbose else INFO)
+            self.logger.info("")
             self.logger.info(TITLE)
             if self.verifyContent:
                 self.logger.debug("Enabling content verification, checking for ffmpeg...")
@@ -370,6 +371,12 @@ class VimeoCrawler(object):
         url = URL(url)
         self.logger.debug("Going to %s", url)
         self.driver.get(url.url)
+        # ToDo: To overcome simple captcha, this may work
+        # To test: self.driver.get('http://www.google.com/recaptcha/api2/demo')
+        # self.driver.switch_to_frame(self.getElement('iframe'))
+        # self.getElement('recaptcha-checkbox-checkmark').click()
+        # self.driver.switch_to_default_content()
+        # self.getElement('input[type=submit]').click()
 
     def getElement(self, selector, fast = False, multiple = False):
         condition = presence_of_all_elements_located if multiple else presence_of_element_located
@@ -409,7 +416,7 @@ class VimeoCrawler(object):
             links = (link.get_attribute('href') for link in links)
             items = tuple(URL(link) for link in links if VIMEO in link and not link.endswith('settings'))[:self.maxItems]
         except NoSuchElementException, e:
-            self.error(e)
+            self.error(e.msg)
             items = ()
         numVideos = len(tuple(item for item in items if item.isVideo))
         if numVideos:
@@ -450,35 +457,36 @@ class VimeoCrawler(object):
             if target != None:
                 target.add(url.vID)
         elif url.isAccount: # Account main page
-            self.goTo(url.url + '/videos')
-            self.logger.info("Processing account %s", url.account)
-            items = self.getItemsFromFolder() + (url.url + '/channels', url.url + '/albums')
+            self.logger.info("Processing account %s...", url.account)
+            items = tuple(url.url + suffix for suffix in ('/videos', '/channels', '/albums'))
             self.doCreateFolders = self.foldersNeeded
         elif url.isVideos: # Videos
             self.goTo(url)
+            self.logger.info("Processing videos...")
             items = self.getItemsFromFolder()
         elif url.isCategory: # Category
             self.goTo(url)
+            self.logger.info("Processing %s...", url.category)
             items = self.getItemsFromFolder()
             self.doCreateFolders = self.foldersNeeded
         elif url.isFolder: # Folder
             title = None
             self.goTo(url)
             try:
-                title = self.getElement('#page_header h1 a').text
+                title = self.getElement('#page_header h1 a').text # https://vimeo.com/channels/*/videos
             except NoSuchElementException:
                 try:
-                    title = self.getElement('#page_header h1').text
+                    title = self.getElement('#page_header h1').text # https://vimeo.com/album/*
                 except NoSuchElementException:
                     try:
-                        title = self.getElement('#group_header h1 a').get_attribute('title')
+                        title = self.getElement('#group_header h1 a').get_attribute('title') # https://vimeo.com/groups/*/videos
                     except NoSuchElementException:
                         try:
-                            title = self.getElement('#group_header h1 a').text
+                            title = self.getElement('#group_header h1 a').text # backup
                         except NoSuchElementException, e:
-                            self.logger.error(e)
+                            self.logger.error(e.msg)
             if title:
-                self.logger.info("Folder: %s", encodeForConsole(title))
+                self.logger.info("Processing folder %s", encodeForConsole(title))
                 if self.doCreateFolders:
                     dirName = self.createDir(cleanupFileName(title.strip().rstrip('.'))) # unicode
                     url.createFile(dirName)
@@ -488,6 +496,7 @@ class VimeoCrawler(object):
                 items = self.getItemsFromFolder()
         else: # Some other page
             self.goTo(url)
+            self.logger.info("Processing page %s...", url.url)
             items = self.getItemsFromPage()
         for item in items:
             self.getItemsFromURL(item, target)
@@ -507,16 +516,23 @@ class VimeoCrawler(object):
     def processVideo(self, vID, number):
         title = ''
         download = None
+        isPrivate = None
         try:
             self.goTo(vID)
-            title = encodeForConsole(self.getElement('#page_header h1').text.strip().rstrip('.'))
+            title = encodeForConsole(self.getElement('#page_header .video_meta h1').text.strip().rstrip('.'))
             try:
                 self.getElement('.iconify_down_b', fast = True).click()
                 download = self.getElement('#download')
             except NoSuchElementException, e:
                 pass
+            try: # Check if video is private
+                isPrivate = self.getElement('.private')
+            except NoSuchElementException:
+                pass
         except NoSuchElementException, e:
-            self.error(e)
+            self.error(e.msg)
+            self.logger.debug("")
+            return
         # Parse download links
         link = linkSize = localSize = downloadOK = downloadSkip = None
         if download:
@@ -547,13 +563,8 @@ class VimeoCrawler(object):
                     self.error("Error getting remote file size: %s", e)
         else:
             description = extension = 'NONE'
-        try: # Check if video is private
-            self.getElement('.private')
-            isPrivate = True
-        except NoSuchElementException:
-            isPrivate = False
         # Prepare file information
-        self.logger.info('%s%s (%s) %d/%d %d%%%s', title, ' [PRIVATE]' if isPrivate else '', description, number, len(self.vIDs), int(number * 100.0 / len(self.vIDs)), (' %s' % readableSize(self.totalFileSize)) if self.totalFileSize else '')
+        self.logger.info('%d %s%s (%s) %d/%d %d%%%s', vID, title, ' [P]' if isPrivate else '', description, number, len(self.vIDs), int(number * 100.0 / len(self.vIDs)), (' %s' % readableSize(self.totalFileSize)) if self.totalFileSize else '')
         fileName = cleanupFileName('%s.%s' % (' '.join(((title.decode(CONSOLE_ENCODING),) if title else ()) + (str(vID),)), extension.lower())) # unicode
         targetFileName = encodeForFileSystem(join(self.targetDirectory, fileName))
         if self.setLanguage or self.setPreset or self.setHD:
