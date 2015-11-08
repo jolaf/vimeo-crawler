@@ -1,19 +1,18 @@
 #!/usr/bin/python
 from getopt import getopt
 from itertools import count
-from logging import getLogger, Formatter, FileHandler, StreamHandler, DEBUG, INFO, WARNING
-from re import compile as reCompile
-from os import fdopen, listdir, makedirs, remove
+from logging import getLogger, FileHandler, StreamHandler, Filter, Formatter, DEBUG, INFO, WARNING
+from os import close, fdopen, listdir, makedirs, remove
 from os.path import getmtime, getsize, isdir, isfile, join, lexists
+from re import compile as reCompile
 from subprocess import Popen, PIPE, STDOUT
 from sys import argv, exit as sysExit, getfilesystemencoding, platform, stdout
+from tempfile import mkstemp
 from time import time
 from traceback import format_exc
 
 # Console output encoding and buffering problems fixing
 stdout = fdopen(stdout.fileno(), 'w', 0)
-
-# ToDo: Gather all errors to re-display in the end
 
 try: # Selenium configuration
     import selenium
@@ -35,7 +34,7 @@ except ImportError, ex:
     print "%s: %s\nERROR: This software requires pycurl.\nPlease install pycurl v7.19.3.1 or later: https://pypi.python.org/pypi/pycurl\n" % (ex.__class__.__name__, ex)
     sysExit(-1)
 
-try: # urlgrabber downloader library, requires pycurl
+try: # urlgrabber downloader library, used to download files, requires pycurl
     import urlgrabber
     from urlgrabber.grabber import URLGrabber, URLGrabError
     if tuple(int(v) for v in urlgrabber.__version__.split('.')) < (3, 10):
@@ -57,7 +56,7 @@ except ImportError, ex:
     print "%s: %s\nERROR: This software requires urlgrabber.\nPlease install urlgrabber v3.9.1, preferably 3.10 or later: https://pypi.python.org/pypi/urlgrabber\n" % (ex.__class__.__name__, ex)
     sysExit(-1)
 
-try: # Requests HTTP library
+try: # Requests HTTP library, used to get remote file size
     import requests
     if tuple(int(v) for v in requests.__version__.split('.')) < (2, 3, 0):
         raise ImportError('Requests version %s < 2.3.0' % requests.__version__)
@@ -83,7 +82,7 @@ except ImportError:
 
 isWindows = platform.lower().startswith('win')
 
-TITLE = 'VimeoCrawler v1.89 (c) 2013-2015 Vasily Zakharov vmzakhar@gmail.com'
+TITLE = 'VimeoCrawler v1.9 (c) 2013-2015 Vasily Zakharov vmzakhar@gmail.com'
 
 OPTION_NAMES = ('directory', 'login', 'max-items', 'retries', 'set-language', 'preset', 'timeout', 'webdriver')
 FIELD_NAMES = ('targetDirectory', 'credentials', 'maxItems', 'retryCount', 'setLanguage', 'setPreset', 'timeout', 'driverName')
@@ -141,6 +140,8 @@ LOG_FILE_NAME = 'VimeoCrawler.log'
 
 VIMEO = 'vimeo.com'
 VIMEO_URL = 'https://%s/%%s' % VIMEO
+
+HTTP_ERROR_PATTERN = reCompile(r'.*"(.*)"$')
 
 SYSTEM_LINKS = ('about', 'blog', 'categories', 'channels', 'cookie_policy', 'couchmode', 'creativecommons', 'creatorservices', 'dmca', 'enhancer', 'everywhere', 'explore', 'groups', 'help', 'jobs', 'join', 'log_in', 'love', 'musicstore', 'ondemand', 'plus', 'privacy', 'pro', 'robots.txt', 'search', 'site_map', 'staffpicks', 'terms', 'upload', 'videoschool') # http://vimeo.com/link
 CATEGORIES_LINKS = ('albums', 'groups', 'channels') # http://vimeo.com/account/category
@@ -331,17 +332,33 @@ class VimeoCrawler(object):
             self.createDir()
             if self.startURL:
                 self.startURL.createFile(self.targetDirectory)
+                if self.startURL.isVideo:
+                    self.detectObsolete = False
             # Configuring logging
             rootLogger = getLogger()
             if not rootLogger.handlers:
-                formatter = Formatter("%(asctime)s %(levelname)s %(message)s", '%Y-%m-%d %H:%M:%S')
+                formatter = Formatter("%(asctime)s %(levelname)5s %(message)s", '%Y-%m-%d %H:%M:%S')
                 streamHandler = StreamHandler()
                 streamHandler.setFormatter(formatter)
                 fileHandler = FileHandler(join(self.targetDirectory, LOG_FILE_NAME))
                 fileHandler.setFormatter(formatter)
+                (f, self.errorLogFileName) = mkstemp('.log', 'VimeoCrawlerErrors-')
+                close(f)
+                self.errorHandler = FileHandler(self.errorLogFileName)
+                self.errorHandler.setFormatter(Formatter("%(operation)s\n  %(levelname)5s %(message)s", '%Y-%m-%d %H:%M:%S'))
+                self.errorHandler.setLevel(WARNING)
+                class OperationFilter(Filter):
+                    def __init__(self):
+                        super(OperationFilter, self).__init__()
+                        self.operation = None
+                    def filter(self, record):
+                        record.operation = self.operation
+                        return True
+                self.operationFilter = OperationFilter()
+                self.errorHandler.addFilter(self.operationFilter)
                 rootLogger.addHandler(streamHandler)
                 rootLogger.addHandler(fileHandler)
-            #rootLogger.setLevel(INFO if self.verbose else WARNING)
+                rootLogger.addHandler(self.errorHandler)
             self.logger = getLogger('vimeo')
             self.logger.setLevel(DEBUG if self.verbose else INFO)
             self.logger.info("")
@@ -357,6 +374,9 @@ class VimeoCrawler(object):
         except Exception, e:
             usage("ERROR: %s" % e)
 
+    def setOperation(self, operation):
+        self.operationFilter.operation = operation
+
     def error(self, *args, **kwargs):
         self.errors += 1
         self.logger.error(*args, **kwargs)
@@ -370,13 +390,26 @@ class VimeoCrawler(object):
     def goTo(self, url):
         url = URL(url)
         self.logger.debug("Going to %s", url)
+        self.setOperation(str(url))
         self.driver.get(url.url)
-        # ToDo: To overcome simple captcha, this may work
-        # To test: self.driver.get('http://www.google.com/recaptcha/api2/demo')
-        # self.driver.switch_to_frame(self.getElement('iframe'))
-        # self.getElement('recaptcha-checkbox-checkmark').click()
-        # self.driver.switch_to_default_content()
-        # self.getElement('input[type=submit]').click()
+        try:
+            self.getElement("#topnav_desktop") # Detect if this is a Vimeo page
+        except NoSuchElementException:
+            try:
+                self.getElement(".g-recaptcha")
+                try: # Trying to overcome Google reCAPTCHA. To test, use self.driver.get('http://www.google.com/recaptcha/api2/demo')
+                    self.driver.switch_to_frame(self.getElement('iframe'))
+                    self.getElement('.recaptcha-checkbox-checkmark').click()
+                    self.driver.switch_to_default_content()
+                    self.getElement('input[type=submit]').click()
+                    self.driver.get(url.url)
+                    self.getElement("#topnav_desktop") # Detect if this is a Vimeo page
+                except NoSuchElementException:
+                    self.logger.critical("Hit reCAPTCHA, can't overcome, aborting")
+                    sysExit(-3)
+            except NoSuchElementException:
+                self.logger.warning("Unindentified page, retrying")
+                self.driver.get(url.url)
 
     def getElement(self, selector, fast = False, multiple = False):
         condition = presence_of_all_elements_located if multiple else presence_of_element_located
@@ -386,7 +419,7 @@ class VimeoCrawler(object):
                 raise TimeoutException()
             return WebDriverWait(self.driver, self.timeout).until(condition((By.CSS_SELECTOR, selector)))
         except TimeoutException:
-            return finder(selector) # Would throw NoSuchElementException to be printed properly later
+            return finder(selector) # Would throw NoSuchElementException to be printed nicely later
 
     def getElements(self, selector):
         return self.getElement(selector, multiple = True)
@@ -411,6 +444,7 @@ class VimeoCrawler(object):
 
     def getItemsFromPage(self):
         self.logger.debug("Processing %s", self.driver.current_url)
+        self.setOperation(self.driver.current_url)
         try:
             links = self.getElements('#browse_content .browse a')
             links = (link.get_attribute('href') for link in links)
@@ -450,6 +484,8 @@ class VimeoCrawler(object):
         if not self.startURL:
             self.startURL = url
             self.startURL.createFile(self.targetDirectory)
+            if self.startURL.isVideo:
+                self.detectObsolete = False
         items = ()
         if url.isVideo: # Video
             if url.vID not in self.vIDs:
@@ -487,6 +523,7 @@ class VimeoCrawler(object):
                             self.logger.error(e.msg)
             if title:
                 self.logger.info("Processing folder %s", encodeForConsole(title))
+                self.setOperation(encodeForConsole(title))
                 if self.doCreateFolders:
                     dirName = self.createDir(cleanupFileName(title.strip().rstrip('.'))) # unicode
                     url.createFile(dirName)
@@ -519,19 +556,24 @@ class VimeoCrawler(object):
         isPrivate = None
         try:
             self.goTo(vID)
-            title = encodeForConsole(self.getElement('#page_header .video_meta h1').text.strip().rstrip('.'))
             try:
-                self.getElement('.iconify_down_b', fast = True).click()
-                download = self.getElement('#download')
+                titleElement = self.getElement('#page_header .video_meta h1') # Legacy style video page
+                legacyStyle = True
+            except NoSuchElementException, e:
+                titleElement = self.getElement('h1.clip_info-header span:not([title])') # New style video page
+                legacyStyle = False
+            title = encodeForConsole(titleElement.text.strip().rstrip('.'))
+            try:
+                (self.getElement('.iconify_down_b', fast = True) if legacyStyle else self.driver.find_element_by_link_text('Download')).click()
+                download = self.getElement('#download' if legacyStyle else "#download_panel")
             except NoSuchElementException, e:
                 pass
             try: # Check if video is private
-                isPrivate = self.getElement('.private')
+                isPrivate = self.getElement('.private' if legacyStyle else 'h1.clip_info-header span[title="Password Protected"]')
             except NoSuchElementException:
                 pass
         except NoSuchElementException, e:
             self.error(e.msg)
-            self.logger.debug("")
             return
         # Parse download links
         link = linkSize = localSize = downloadOK = downloadSkip = None
@@ -564,7 +606,9 @@ class VimeoCrawler(object):
         else:
             description = extension = 'NONE'
         # Prepare file information
-        self.logger.info('%d %s%s (%s) %d/%d %d%%%s', vID, title, ' [P]' if isPrivate else '', description, number, len(self.vIDs), int(number * 100.0 / len(self.vIDs)), (' %s' % readableSize(self.totalFileSize)) if self.totalFileSize else '')
+        operation = '%d %s%s (%s) %d/%d %d%%%s' % (vID, title, ' [P]' if isPrivate else '', description, number, len(self.vIDs), int(number * 100.0 / len(self.vIDs)), (' %s' % readableSize(self.totalFileSize)) if self.totalFileSize else '')
+        self.logger.info(operation)
+        self.setOperation(operation)
         fileName = cleanupFileName('%s.%s' % (' '.join(((title.decode(CONSOLE_ENCODING),) if title else ()) + (str(vID),)), extension.lower())) # unicode
         targetFileName = encodeForFileSystem(join(self.targetDirectory, fileName))
         if self.setLanguage or self.setPreset or self.setHD:
@@ -708,7 +752,14 @@ class VimeoCrawler(object):
                     grabber.urlgrab(link, filename = targetFileName)
                     downloadOK = True
                 except URLGrabError, e:
-                    self.error("Download failed: %s", e)
+                    if e.errno == 14 and e.code == 22:
+                        httpError = HTTP_ERROR_PATTERN.match(e.strerror).group(1)
+                        if not self.getFileSizes and ' 416 ' in httpError:
+                            downloadOK = True
+                        else:
+                            self.error("Download failed: %s", httpError)
+                    else:
+                        self.error("Download failed: %s", e)
                 except KeyboardInterrupt:
                     self.error("Download interrupted")
                 if downloadOK:
@@ -741,7 +792,6 @@ class VimeoCrawler(object):
                 (hardlink if self.useHardLinks else symlink)(join('..', fileName), linkFileName)
             except Exception, e:
                 self.error("Can't create link at %s: %s", encodeForConsole(linkFileName), e)
-        self.logger.debug("")
 
     def checkForObsoletes(self):
         self.logger.info("Checking for obsolete files...")
@@ -767,7 +817,6 @@ class VimeoCrawler(object):
                 continue
             for (fileName, fullName) in sorted(fileNames, key = lambda (fileName, fullName): (getsize(fullName), getmtime(fullName)))[:-1]:
                 self.logger.warning("Duplicate vID file detected: %s", encodeForConsole(fileName))
-        self.logger.info("Done")
 
     def run(self):
         self.doCreateFolders = False
@@ -801,6 +850,16 @@ class VimeoCrawler(object):
                 self.driver.close()
         self.logger.info("Crawling completed" + (' with %d errors' % self.errors if self.errors else ''))
         self.checkForObsoletes()
+        self.errorHandler.close()
+        getLogger().removeHandler(self.errorHandler)
+        with open(self.errorLogFileName) as f:
+            summary = f.read().strip()
+        try:
+            remove(self.errorLogFileName)
+        except:
+            pass
+        if summary:
+            (self.logger.error if self.errors else self.logger.warning)("Here's the summary of warnings and errors encountered:\n%s", summary)
         return self.errors
 
 def main(args):

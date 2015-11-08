@@ -14,8 +14,8 @@ directory, with file system links to the files in the target directory.
 In default configuration, the program requires Mozilla Firefox.
 
 The program starts a browser window and emulates clicks in it.
-Please don't do anything inside that window, and don't minimize it.
-You may cover it with another window, if you wish.
+Please don't do anything inside that window.
+You may minimize it or cover it with another window, if you wish.
 The window will be closed automatically after crawling is complete.
 
 The program is best run on Linux.
