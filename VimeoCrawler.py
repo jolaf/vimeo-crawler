@@ -3,7 +3,7 @@ from getopt import getopt
 from itertools import count
 from logging import getLogger, FileHandler, StreamHandler, Filter, Formatter, DEBUG, INFO, WARNING
 from os import close, fdopen, listdir, makedirs, remove
-from os.path import getmtime, getsize, isdir, isfile, join, lexists
+from os.path import basename, getmtime, getsize, isdir, isfile, join, lexists
 from re import compile as reCompile
 from subprocess import Popen, PIPE, STDOUT
 from sys import argv, exit as sysExit, getfilesystemencoding, platform, stdout
@@ -82,7 +82,7 @@ except ImportError:
 
 isWindows = platform.lower().startswith('win')
 
-TITLE = 'VimeoCrawler v1.9 (c) 2013-2015 Vasily Zakharov vmzakhar@gmail.com'
+TITLE = 'VimeoCrawler v1.91 (c) 2013-2015 Vasily Zakharov vmzakhar@gmail.com'
 
 OPTION_NAMES = ('directory', 'login', 'max-items', 'retries', 'set-language', 'preset', 'timeout', 'webdriver')
 FIELD_NAMES = ('targetDirectory', 'credentials', 'maxItems', 'retryCount', 'setLanguage', 'setPreset', 'timeout', 'driverName')
@@ -90,9 +90,9 @@ SHORT_OPTIONS = ''.join(('%c:' % option[0]) for option in OPTION_NAMES) + 'hvnfz
 LONG_OPTIONS = tuple(('%s=' % option) for option in OPTION_NAMES) + ('help', 'verbose', 'no-download', 'no-folders', 'no-filesize', 'verify-content', 'verify-existing', 'detect-obsolete', 'hard-links', 'hd')
 OPTION_PATTERNS = tuple(reCompile(pattern) for pattern in (r'-([^-\s])', r'--(\S+)'))
 
-USAGE_INFO = '''Usage: python VimeoCrawler.py [options] [startURL or videoID]
+USAGE_INFO = '''Usage: python VimeoCrawler.py [options] [startURL|videoID videoID ...]
 
-The crawler checks the specified URL and processes the specified video,
+The crawler checks the specified URL and processes the specified videos,
 album, channel or the whole account, trying to locate the highest available
 quality file for each video.
 
@@ -148,7 +148,7 @@ CATEGORIES_LINKS = ('albums', 'groups', 'channels') # http://vimeo.com/account/c
 VIDEOS_LINKS = ('videos') # http://vimeo.com/account/videos
 FOLDERS_LINKS = ('album', 'groups', 'channels') # http://vimeo.com/folder/*
 FOLDER_NAMES = {'albums': 'album', 'groups': 'group', 'channels': 'channel'} # Mapping to singular for printing
-FILE_PREFERENCES = ('Original', '1080p', '720p', 'HD', 'SD') # Vimeo file versions names
+FILE_PREFERENCES = ('Original', '1080p', '720p', 'On2 HD', 'HD', 'On2 SD', 'SD') # Vimeo file versions names
 
 UNITS = ('bytes', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB')
 def readableSize(size):
@@ -214,8 +214,9 @@ class URL(object):
             self.url += '/videos'
 
     def createFile(self, directory):
-        with open(join(directory, self.FILE_NAME), 'w') as f:
-            f.write('[InternetShortcut]\nURL=%s\n' % self.url.split('/videos')[0])
+        if not self.isVideo:
+            with open(join(directory, self.FILE_NAME), 'w') as f:
+                f.write('[InternetShortcut]\nURL=%s\n' % self.url.split('/videos')[0])
 
     def __str__(self):
         return self.url
@@ -322,18 +323,26 @@ class VimeoCrawler(object):
                 raise ValueError("-r / --retries parameter must be a non-negative integer")
             if self.setLanguage:
                 self.setLanguage = self.setLanguage.capitalize()
-            if len(parameters) > 1:
-                raise ValueError("Too many parameters")
             if parameters:
-                self.startURL = URL(parameters[0])
+                try:
+                    self.vIDs = tuple(URL(p).vID for p in parameters)
+                    if None in self.vIDs: # At least one parameter is not video
+                        raise ValueError
+                    self.detectObsolete = False
+                except ValueError:
+                    if len(parameters) == 1:
+                        self.vIDs = []
+                        self.startURL = URL(parameters[0])
+                    else:
+                        raise ValueError("If multiple parameters are specified, they must all be videos")
             elif not self.credentials:
                 raise ValueError("Neither login credentials nor start URL is specified")
+            else:
+                self.vIDs = []
             # Creating target directory
             self.createDir()
             if self.startURL:
                 self.startURL.createFile(self.targetDirectory)
-                if self.startURL.isVideo:
-                    self.detectObsolete = False
             # Configuring logging
             rootLogger = getLogger()
             if not rootLogger.handlers:
@@ -401,7 +410,6 @@ class VimeoCrawler(object):
                     self.driver.switch_to_frame(self.getElement('iframe'))
                     self.getElement('.recaptcha-checkbox-checkmark').click()
                     self.driver.switch_to_default_content()
-                    self.getElement('input[type=submit]').click()
                     self.driver.get(url.url)
                     self.getElement("#topnav_desktop") # Detect if this is a Vimeo page
                 except NoSuchElementException:
@@ -484,8 +492,6 @@ class VimeoCrawler(object):
         if not self.startURL:
             self.startURL = url
             self.startURL.createFile(self.targetDirectory)
-            if self.startURL.isVideo:
-                self.detectObsolete = False
         items = ()
         if url.isVideo: # Video
             if url.vID not in self.vIDs:
@@ -563,14 +569,21 @@ class VimeoCrawler(object):
                 titleElement = self.getElement('h1.clip_info-header span:not([title])') # New style video page
                 legacyStyle = False
             title = encodeForConsole(titleElement.text.strip().rstrip('.'))
-            try:
-                (self.getElement('.iconify_down_b', fast = True) if legacyStyle else self.driver.find_element_by_link_text('Download')).click()
-                download = self.getElement('#download' if legacyStyle else "#download_panel")
-            except NoSuchElementException, e:
-                pass
             try: # Check if video is private
-                isPrivate = self.getElement('.private' if legacyStyle else 'h1.clip_info-header span[title="Password Protected"]')
+                isPrivate = self.getElement('.private' if legacyStyle else 'h1.clip_info-header span[title="Password Protected"]', fast = True)
             except NoSuchElementException:
+                pass
+            try:
+                author = self.getElement('#page_header .byline a[rel=author]' if legacyStyle else 'a.js-user_link').text.strip()
+                if author == self.userName:
+                    author = None
+            except NoSuchElementException:
+                self.error("Failed to identify author")
+                author = None
+            try:
+                self.getElement('.iconify_down_b' if legacyStyle else "div.clip_details-actions button span:contains('Download')", fast = True).click()
+                download = self.getElement('#download' if legacyStyle else "#download_panel", fast = True)
+            except NoSuchElementException, e:
                 pass
         except NoSuchElementException, e:
             self.error(e.msg)
@@ -578,12 +591,13 @@ class VimeoCrawler(object):
         # Parse download links
         link = linkSize = localSize = downloadOK = downloadSkip = None
         if download:
+            xpath = '//a[%s]' if legacyStyle else '//td[%s]/following-sibling::td[text()="Download"]'
             for preference in FILE_PREFERENCES:
                 try:
-                    link = download.find_element_by_link_text(preference)
+                    link = download.find_element_by_xpath(xpath % ('text()="%s"' % preference)) # exact match
                 except NoSuchElementException:
                     try:
-                        link = download.find_element_by_partial_link_text(preference)
+                        link = download.find_element_by_xpath(xpath % ('contains(text(), "%s")' % preference)) # contains match
                     except NoSuchElementException:
                         pass
                 if link:
@@ -606,18 +620,13 @@ class VimeoCrawler(object):
         else:
             description = extension = 'NONE'
         # Prepare file information
-        operation = '%d %s%s (%s) %d/%d %d%%%s' % (vID, title, ' [P]' if isPrivate else '', description, number, len(self.vIDs), int(number * 100.0 / len(self.vIDs)), (' %s' % readableSize(self.totalFileSize)) if self.totalFileSize else '')
+        operation = '%d %s%s (%s) %d/%d %d%%%s' % (vID, title, ' [P]' if isPrivate else (' [%s]' % encodeForConsole(author)) if author else '', description, number, len(self.vIDs), int(number * 100.0 / len(self.vIDs)), (' %s' % readableSize(self.totalFileSize)) if self.totalFileSize else '')
         self.logger.info(operation)
         self.setOperation(operation)
         fileName = cleanupFileName('%s.%s' % (' '.join(((title.decode(CONSOLE_ENCODING),) if title else ()) + (str(vID),)), extension.lower())) # unicode
         targetFileName = encodeForFileSystem(join(self.targetDirectory, fileName))
         if self.setLanguage or self.setPreset or self.setHD:
-            try:
-                author = self.getElement('#page_header .byline a[rel=author]').text.strip()
-            except NoSuchElementException:
-                self.error("Failed to identify author")
-                author = None
-            if author not in (None, self.userName):
+            if author:
                 self.logger.warning("Video author is %s, skipping settings", author)
             else: # Matching author or unindentified author
                 try:
@@ -796,17 +805,17 @@ class VimeoCrawler(object):
     def checkForObsoletes(self):
         self.logger.info("Checking for obsolete files...")
         files = {}
+        folders = set(basename(dirName) for (dirName, _vIDs) in self.folders)
         for fileName in listdir(unicode(self.targetDirectory)):
-            if '.' not in fileName:
-                continue
             fullName = join(self.targetDirectory, fileName)
-            if not isfile(fullName):
-                continue
-            try:
-                vID = int(fileName[fileName.rfind(' ') + 1 : fileName.rfind('.')])
-                files[vID] = files.get(vID, []) + [(fileName, fullName),]
-            except ValueError:
-                pass
+            if '.' in fileName and isfile(fullName):
+                try:
+                    vID = int(fileName[fileName.rfind(' ') + 1 : fileName.rfind('.')])
+                    files[vID] = files.get(vID, []) + [(fileName, fullName),]
+                except ValueError:
+                    pass
+            elif self.detectObsolete and isdir(fullName) and not fileName in folders:
+                self.logger.warning("Unknown folder detected: %s", encodeForConsole(fileName))
         for (vID, fileNames) in files.iteritems():
             assert fileNames
             if self.detectObsolete and vID not in self.vIDs:
@@ -822,7 +831,6 @@ class VimeoCrawler(object):
         self.doCreateFolders = False
         self.loggedIn = False
         self.userName = None
-        self.vIDs = []
         self.folders = []
         self.totalFileSize = 0
         self.errors = 0
@@ -833,15 +841,17 @@ class VimeoCrawler(object):
                 self.login(*self.credentials)
                 if not self.loggedIn:
                     raise ValueError("Aborting")
-            self.getItemsFromURL(self.startURL)
-            if self.folders:
-                self.logger.info("Got total of %d folders", len(self.folders))
+            if not self.vIDs:
+                self.getItemsFromURL(self.startURL)
+                if self.folders:
+                    self.logger.info("Got total of %d folders", len(self.folders))
+                self.vIDs = tuple(sorted(self.vIDs, reverse = True))
             if self.vIDs:
                 assert len(self.vIDs) == len(set(self.vIDs))
                 self.logger.info("Processing %d videos...", len(self.vIDs))
                 if self.getFileSizes:
                     requests.adapters.DEFAULT_RETRIES = self.retryCount
-                for (n, vID) in enumerate(sorted(self.vIDs, reverse = True), 1):
+                for (n, vID) in enumerate(self.vIDs, 1):
                     self.processVideo(vID, n)
         except Exception, e:
             self.error(format_exc() if self.verbose else e)
@@ -849,7 +859,6 @@ class VimeoCrawler(object):
             if self.driver:
                 self.driver.close()
         self.logger.info("Crawling completed" + (' with %d errors' % self.errors if self.errors else ''))
-        self.checkForObsoletes()
         self.errorHandler.close()
         getLogger().removeHandler(self.errorHandler)
         with open(self.errorLogFileName) as f:
@@ -860,6 +869,7 @@ class VimeoCrawler(object):
             pass
         if summary:
             (self.logger.error if self.errors else self.logger.warning)("Here's the summary of warnings and errors encountered:\n%s", summary)
+        self.checkForObsoletes()
         return self.errors
 
 def main(args):
