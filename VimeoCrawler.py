@@ -82,7 +82,7 @@ except ImportError:
 
 isWindows = platform.lower().startswith('win')
 
-TITLE = 'VimeoCrawler v1.91 (c) 2013-2015 Vasily Zakharov vmzakhar@gmail.com'
+TITLE = 'VimeoCrawler v1.92 (c) 2013-2015 Vasily Zakharov vmzakhar@gmail.com'
 
 OPTION_NAMES = ('directory', 'login', 'max-items', 'retries', 'set-language', 'preset', 'timeout', 'webdriver')
 FIELD_NAMES = ('targetDirectory', 'credentials', 'maxItems', 'retryCount', 'setLanguage', 'setPreset', 'timeout', 'driverName')
@@ -254,7 +254,9 @@ class VimeoCrawler(object):
         self.maxItems = None
         self.setLanguage = None
         self.setPreset = None
+        # Startup defaults
         self.startURL = None
+        self.errors = 0
         try:
             # Reading command line options
             (options, parameters) = getopt(args, SHORT_OPTIONS, LONG_OPTIONS)
@@ -372,10 +374,12 @@ class VimeoCrawler(object):
             self.logger.setLevel(DEBUG if self.verbose else INFO)
             self.logger.info("")
             self.logger.info(TITLE)
-            if self.verifyContent:
+            if self.verifyContent or self.verifyExisting:
                 self.logger.debug("Enabling content verification, checking for ffmpeg...")
+                self.setOperation("Enabling content verification, checking for ffmpeg...")
                 subprocess = Popen('ffmpeg', shell = True, stdout = PIPE, stderr = STDOUT)
-                if subprocess.returncode:
+                subprocess.communicate()
+                if subprocess.returncode not in (0, 1):
                     self.error("ffmpeg check FAILED (code %d), content verification NOT enabled", subprocess.returncode)
                     self.verifyContent = self.verifyExisting = False
                 else:
@@ -402,21 +406,24 @@ class VimeoCrawler(object):
         self.setOperation(str(url))
         self.driver.get(url.url)
         try:
-            self.getElement("#topnav_desktop") # Detect if this is a Vimeo page
+            self.getElement("#topnav_desktop", fast = True) # Detect if this is a Vimeo page
         except NoSuchElementException:
-            try:
+            try: # Trying to overcome Google reCAPTCHA. To test, use self.driver.get('http://www.google.com/recaptcha/api2/demo')
                 self.getElement(".g-recaptcha")
-                try: # Trying to overcome Google reCAPTCHA. To test, use self.driver.get('http://www.google.com/recaptcha/api2/demo')
-                    self.driver.switch_to_frame(self.getElement('iframe'))
-                    self.getElement('.recaptcha-checkbox-checkmark').click()
-                    self.driver.switch_to_default_content()
-                    self.driver.get(url.url)
-                    self.getElement("#topnav_desktop") # Detect if this is a Vimeo page
-                except NoSuchElementException:
-                    self.logger.critical("Hit reCAPTCHA, can't overcome, aborting")
-                    sysExit(-3)
+                self.driver.switch_to_frame(self.getElement('iframe', fast = True))
+                self.getElement('.recaptcha-checkbox-checkmark', fast = True).click()
+                self.driver.switch_to_default_content()
+                first = True
+                while True:
+                    try:
+                        self.getElement("#topnav_desktop") # Detect if this is a Vimeo page
+                        break
+                    except NoSuchElementException:
+                        if first:
+                            self.logger.info("Hit reCAPTCHA, user input required")
+                            first = False
             except NoSuchElementException:
-                self.logger.warning("Unindentified page, retrying")
+                self.logger.error("Unindentified page, retrying")
                 self.driver.get(url.url)
 
     def getElement(self, selector, fast = False, multiple = False):
@@ -515,16 +522,16 @@ class VimeoCrawler(object):
             title = None
             self.goTo(url)
             try:
-                title = self.getElement('#page_header h1 a').text # https://vimeo.com/channels/*/videos
+                title = self.getElement('#page_header h1 a', fast = True).text # https://vimeo.com/channels/*/videos
             except NoSuchElementException:
                 try:
-                    title = self.getElement('#page_header h1').text # https://vimeo.com/album/*
+                    title = self.getElement('#page_header h1', fast = True).text # https://vimeo.com/album/*
                 except NoSuchElementException:
                     try:
-                        title = self.getElement('#group_header h1 a').get_attribute('title') # https://vimeo.com/groups/*/videos
+                        title = self.getElement('#group_header h1 a', fast = True).get_attribute('title') # https://vimeo.com/groups/*/videos
                     except NoSuchElementException:
                         try:
-                            title = self.getElement('#group_header h1 a').text # backup
+                            title = self.getElement('#group_header h1 a', fast = True).text # backup
                         except NoSuchElementException, e:
                             self.logger.error(e.msg)
             if title:
@@ -581,7 +588,7 @@ class VimeoCrawler(object):
                 self.error("Failed to identify author")
                 author = None
             try:
-                self.getElement('.iconify_down_b' if legacyStyle else "div.clip_details-actions button span:contains('Download')", fast = True).click()
+                (self.getElement('.iconify_down_b', fast = True) if legacyStyle else self.driver.find_element_by_xpath('//button//span[.="Download"]')).click()
                 download = self.getElement('#download' if legacyStyle else "#download_panel", fast = True)
             except NoSuchElementException, e:
                 pass
@@ -591,13 +598,13 @@ class VimeoCrawler(object):
         # Parse download links
         link = linkSize = localSize = downloadOK = downloadSkip = None
         if download:
-            xpath = '//a[%s]' if legacyStyle else '//td[%s]/following-sibling::td[text()="Download"]'
+            xpath = '//a[%s]' if legacyStyle else '//td[%s]/following-sibling::td/a[.="Download"]'
             for preference in FILE_PREFERENCES:
                 try:
-                    link = download.find_element_by_xpath(xpath % ('text()="%s"' % preference)) # exact match
+                    link = download.find_element_by_xpath(xpath % ('.="%s"' % preference)) # exact match
                 except NoSuchElementException:
                     try:
-                        link = download.find_element_by_xpath(xpath % ('contains(text(), "%s")' % preference)) # contains match
+                        link = download.find_element_by_xpath(xpath % ('contains(., "%s")' % preference)) # contains match
                     except NoSuchElementException:
                         pass
                 if link:
@@ -623,6 +630,8 @@ class VimeoCrawler(object):
         operation = '%d %s%s (%s) %d/%d %d%%%s' % (vID, title, ' [P]' if isPrivate else (' [%s]' % encodeForConsole(author)) if author else '', description, number, len(self.vIDs), int(number * 100.0 / len(self.vIDs)), (' %s' % readableSize(self.totalFileSize)) if self.totalFileSize else '')
         self.logger.info(operation)
         self.setOperation(operation)
+        if not legacyStyle:
+            self.logger.warning("New style video page detected!")
         fileName = cleanupFileName('%s.%s' % (' '.join(((title.decode(CONSOLE_ENCODING),) if title else ()) + (str(vID),)), extension.lower())) # unicode
         targetFileName = encodeForFileSystem(join(self.targetDirectory, fileName))
         if self.setLanguage or self.setPreset or self.setHD:
@@ -833,7 +842,6 @@ class VimeoCrawler(object):
         self.userName = None
         self.folders = []
         self.totalFileSize = 0
-        self.errors = 0
         try:
             self.logger.info("Starting %s...", self.driverName)
             self.driver = self.driverClass() # ToDo: Provide parameters to the driver
@@ -870,6 +878,7 @@ class VimeoCrawler(object):
         if summary:
             (self.logger.error if self.errors else self.logger.warning)("Here's the summary of warnings and errors encountered:\n%s", summary)
         self.checkForObsoletes()
+        self.logger.info("Done")
         return self.errors
 
 def main(args):
