@@ -1,3 +1,4 @@
-crawler.cmd
+crawler.*
+cycle.*
 *.log
 *.url

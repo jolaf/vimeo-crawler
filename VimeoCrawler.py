@@ -82,7 +82,7 @@ except ImportError:
 
 isWindows = platform.lower().startswith('win')
 
-TITLE = 'VimeoCrawler v1.92 (c) 2013-2015 Vasily Zakharov vmzakhar@gmail.com'
+TITLE = 'VimeoCrawler v1.93 (c) 2013-2015 Vasily Zakharov vmzakhar@gmail.com'
 
 OPTION_NAMES = ('directory', 'login', 'max-items', 'retries', 'set-language', 'preset', 'timeout', 'webdriver')
 FIELD_NAMES = ('targetDirectory', 'credentials', 'maxItems', 'retryCount', 'setLanguage', 'setPreset', 'timeout', 'driverName')
@@ -114,7 +114,7 @@ Options:
 -d --directory - Target directory to save all the output files to, default is the current directory.
 
 -w --webdriver - Selenium WebDriver to use for crawling, default is Firefox.
--t --timeout - Download attempt timeout, default is 10 seconds.
+-t --timeout - Download attempt timeout, default is 3 seconds.
 -r --retries - Number of page download retry attempts, default is 3.
 -m --max-items - Maximum number of items (videos or folders) to retrieve from one page (usable for testing), default is none.
 -s --set-language - Try to set the specified language on all crawled videos.
@@ -249,7 +249,7 @@ class VimeoCrawler(object):
         # Options with parameters
         self.credentials = None
         self.targetDirectory = '.'
-        self.timeout = 10
+        self.timeout = 3
         self.retryCount = 3
         self.maxItems = None
         self.setLanguage = None
@@ -348,7 +348,7 @@ class VimeoCrawler(object):
             # Configuring logging
             rootLogger = getLogger()
             if not rootLogger.handlers:
-                formatter = Formatter("%(asctime)s %(levelname)5s %(message)s", '%Y-%m-%d %H:%M:%S')
+                formatter = Formatter("%(asctime)s %(levelname)7s %(message)s", '%Y-%m-%d %H:%M:%S')
                 streamHandler = StreamHandler()
                 streamHandler.setFormatter(formatter)
                 fileHandler = FileHandler(join(self.targetDirectory, LOG_FILE_NAME))
@@ -582,8 +582,7 @@ class VimeoCrawler(object):
                 pass
             try:
                 author = self.getElement('#page_header .byline a[rel=author]' if legacyStyle else 'a.js-user_link').text.strip()
-                if author == self.userName:
-                    author = None
+                author = None if author == self.userName else encodeForConsole(author)
             except NoSuchElementException:
                 self.error("Failed to identify author")
                 author = None
@@ -596,24 +595,25 @@ class VimeoCrawler(object):
             self.error(e.msg)
             return
         # Parse download links
-        link = linkSize = localSize = downloadOK = downloadSkip = None
+        link = linkTitle = linkSize = localSize = downloadOK = downloadSkip = None
         if download:
-            xpath = '//a[%s]' if legacyStyle else '//td[%s]/following-sibling::td/a[.="Download"]'
+            xpath = '//a[%s]' if legacyStyle else '//td[%s]'
             for preference in FILE_PREFERENCES:
-                try:
-                    link = download.find_element_by_xpath(xpath % ('.="%s"' % preference)) # exact match
+                try: # exact match
+                    linkTitle = download.find_element_by_xpath(xpath % ('.="%s"' % preference))
                 except NoSuchElementException:
-                    try:
-                        link = download.find_element_by_xpath(xpath % ('contains(., "%s")' % preference)) # contains match
+                    try: # contains match
+                        linkTitle = download.find_element_by_xpath(xpath % ('contains(., "%s")' % preference))
                     except NoSuchElementException:
                         pass
-                if link:
+                if linkTitle:
+                    link = linkTitle if legacyStyle else linkTitle.find_element_by_xpath('//following-sibling::td/a[.="Download"]')
                     break
         if link: # Parse chosen download link
             userAgent = str(self.driver.execute_script('return window.navigator.userAgent'))
             cookies = self.driver.get_cookies()
             extension = link.get_attribute('download').split('.')[-1] # unicode
-            description = encodeForConsole('%s/%s' % (link.text, extension.upper()))
+            description = encodeForConsole('%s/%s' % (linkTitle.text, extension.upper()))
             link = str(link.get_attribute('href'))
             if self.getFileSizes:
                 try:
@@ -627,7 +627,7 @@ class VimeoCrawler(object):
         else:
             description = extension = 'NONE'
         # Prepare file information
-        operation = '%d %s%s (%s) %d/%d %d%%%s' % (vID, title, ' [P]' if isPrivate else (' [%s]' % encodeForConsole(author)) if author else '', description, number, len(self.vIDs), int(number * 100.0 / len(self.vIDs)), (' %s' % readableSize(self.totalFileSize)) if self.totalFileSize else '')
+        operation = '%d %s%s (%s) %d/%d %d%%%s' % (vID, title, ' [P]' if isPrivate else (' [%s]' % author) if author else '', description, number, len(self.vIDs), int(number * 100.0 / len(self.vIDs)), (' %s' % readableSize(self.totalFileSize)) if self.totalFileSize else '')
         self.logger.info(operation)
         self.setOperation(operation)
         if not legacyStyle:
@@ -639,7 +639,7 @@ class VimeoCrawler(object):
                 self.logger.warning("Video author is %s, skipping settings", author)
             else: # Matching author or unindentified author
                 try:
-                    self.getElement('#change_settings').click()
+                    (self.getElement('#change_settings') if legacyStyle else self.driver.find_element_by_xpath('//button//span[.="Settings"]')).click()
                     if self.setLanguage:
                         try:
                             languages = self.getElements('select[name=language] option')
@@ -721,8 +721,8 @@ class VimeoCrawler(object):
                 if localSize == linkSize:
                     downloadOK = True
                 elif localSize > linkSize:
-                    downloadSkip = True
                     self.error("Local file is larger (%d) than remote file (%d)", localSize, linkSize)
+                    downloadSkip = True
             if downloadOK or downloadSkip:
                 if self.verifyExisting and not self.verifyFile(targetFileName):
                     downloadOK = False
@@ -766,20 +766,24 @@ class VimeoCrawler(object):
                 progressIndicator = ProgressIndicator()
                 grabber = URLGrabber(reget = 'simple', timeout = self.timeout, progress_obj = progressIndicator,
                     user_agent = userAgent, http_headers = tuple((str(cookie['name']), str(cookie['value'])) for cookie in cookies))
-                try:
-                    grabber.urlgrab(link, filename = targetFileName)
-                    downloadOK = True
-                except URLGrabError, e:
-                    if e.errno == 14 and e.code == 22:
-                        httpError = HTTP_ERROR_PATTERN.match(e.strerror).group(1)
-                        if not self.getFileSizes and ' 416 ' in httpError:
-                            downloadOK = True
+                for _ in xrange(self.retryCount):
+                    try:
+                        grabber.urlgrab(link, filename = targetFileName)
+                        downloadOK = True
+                        break
+                    except URLGrabError, e:
+                        if e.errno == 14 and e.code == 22:
+                            httpError = HTTP_ERROR_PATTERN.match(e.strerror).group(1)
+                            if not self.getFileSizes and ' 416 ' in httpError:
+                                downloadOK = True
+                            else:
+                                self.logger.warning("Download failed: %s", httpError)
                         else:
-                            self.error("Download failed: %s", httpError)
-                    else:
-                        self.error("Download failed: %s", e)
-                except KeyboardInterrupt:
-                    self.error("Download interrupted")
+                            self.logger.warning("Download failed: %s", e.strerror if e.errno == 14 else e)
+                    except KeyboardInterrupt:
+                        self.logger.warning("Download interrupted")
+                else:
+                    self.error("Download ultimately failed after %d retries", self.retryCount)
                 if downloadOK:
                     localSize = getFileSize(targetFileName)
                     if not localSize:
