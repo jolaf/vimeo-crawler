@@ -8,7 +8,7 @@ from re import compile as reCompile
 from subprocess import Popen, PIPE, STDOUT
 from sys import argv, exit as sysExit, getfilesystemencoding, platform, stdout
 from tempfile import mkstemp
-from time import time
+from time import sleep, time
 from traceback import format_exc
 
 # Console output encoding and buffering problems fixing
@@ -82,12 +82,12 @@ except ImportError:
 
 isWindows = platform.lower().startswith('win')
 
-TITLE = 'VimeoCrawler v1.93 (c) 2013-2015 Vasily Zakharov vmzakhar@gmail.com'
+TITLE = 'VimeoCrawler v1.94 (c) 2013-2015 Vasily Zakharov vmzakhar@gmail.com'
 
-OPTION_NAMES = ('directory', 'login', 'max-items', 'retries', 'set-language', 'preset', 'timeout', 'webdriver')
-FIELD_NAMES = ('targetDirectory', 'credentials', 'maxItems', 'retryCount', 'setLanguage', 'setPreset', 'timeout', 'driverName')
-SHORT_OPTIONS = ''.join(('%c:' % option[0]) for option in OPTION_NAMES) + 'hvnfzceo'
-LONG_OPTIONS = tuple(('%s=' % option) for option in OPTION_NAMES) + ('help', 'verbose', 'no-download', 'no-folders', 'no-filesize', 'verify-content', 'verify-existing', 'detect-obsolete', 'hard-links', 'hd')
+OPTION_NAMES = ('directory', 'login', 'max-items', 'retries', 'pause', 'set-language', 'embed-preset', 'timeout', 'webdriver')
+FIELD_NAMES = ('targetDirectory', 'credentials', 'maxItems', 'retryCount', 'pause', 'setLanguage', 'setPreset', 'timeout', 'driverName')
+SHORT_OPTIONS = ''.join(('%c:' % option[0]) for option in OPTION_NAMES) + 'hvunfzcxo'
+LONG_OPTIONS = tuple(('%s=' % option) for option in OPTION_NAMES) + ('help', 'verbose', 'update', 'no-download', 'no-folders', 'no-filesize', 'verify-content', 'verify-existing', 'detect-obsolete', 'hard-links', 'hd')
 OPTION_PATTERNS = tuple(reCompile(pattern) for pattern in (r'-([^-\s])', r'--(\S+)'))
 
 USAGE_INFO = '''Usage: python VimeoCrawler.py [options] [startURL|videoID videoID ...]
@@ -106,6 +106,7 @@ Options:
 -h --help - Displays this help message.
 -v --verbose - Provide verbose logging.
 -n --no-download - Crawl only, do not download anything.
+-u --update - Process only newer videos that were not fully processed before.
 -f --no-folders - Do not create subfolders with links for channels and albums.
 -z --no-filesize - Do not get file sizes for videos (speeds up crawling a bit).
    --hard-links - Use hard links instead of symbolic links in subfolders.
@@ -116,12 +117,13 @@ Options:
 -w --webdriver - Selenium WebDriver to use for crawling, default is Firefox.
 -t --timeout - Download attempt timeout, default is 3 seconds.
 -r --retries - Number of page download retry attempts, default is 3.
+-p --pause - Pause (in seconds) between video retrievals (helps avoid reCAPTCHA).
 -m --max-items - Maximum number of items (videos or folders) to retrieve from one page (usable for testing), default is none.
 -s --set-language - Try to set the specified language on all crawled videos.
--p --preset - Try to set the specified embed preset on all crawled videos.
+-e --embed-preset - Try to set the specified embed preset on all crawled videos.
    --hd - Try to set all crawled videos to embed as HD.
 -c --verify-content - Verify downloaded files to be valid video files, requires ffmpeg to be available in the path.
--e --verify-existing - Verify already downloaded files to be valid video files, requires ffmpeg to be available in the path.
+-x --verify-existing - Verify already downloaded files to be valid video files, requires ffmpeg to be available in the path.
 -o --detect-obsolete - Report existing downloaded files not checked during the run.
 
 If start URL is not specified, the login credentials have to be specified.
@@ -234,6 +236,7 @@ class VimeoCrawler(object):
     def __init__(self, args):
         # Simple options
         self.verbose = False
+        self.updateOnly = False
         self.doDownload = True
         self.foldersNeeded = True
         self.getFileSizes = bool(requests)
@@ -251,6 +254,7 @@ class VimeoCrawler(object):
         self.targetDirectory = '.'
         self.timeout = 3
         self.retryCount = 3
+        self.pause = None
         self.maxItems = None
         self.setLanguage = None
         self.setPreset = None
@@ -265,6 +269,8 @@ class VimeoCrawler(object):
                     usage()
                 elif option in ('-v', '--verbose'):
                     self.verbose = True
+                elif option in ('-u', '--update'):
+                    self.updateOnly = True
                 elif option in ('-n', '--no-download'):
                     self.doDownload = False
                 elif option in ('-f', '--no-folders'):
@@ -273,7 +279,7 @@ class VimeoCrawler(object):
                     self.getFileSizes = False
                 elif option in ('-c', '--verify-content'):
                     self.verifyContent = True
-                elif option in ('-e', '--verify-existing'):
+                elif option in ('-x', '--verify-existing'):
                     self.verifyExisting = True
                 elif option in ('-o', '--detect-obsolete'):
                     self.detectObsolete = True
@@ -323,6 +329,12 @@ class VimeoCrawler(object):
                     raise ValueError
             except ValueError:
                 raise ValueError("-r / --retries parameter must be a non-negative integer")
+            try:
+                self.pause = int(self.pause or 0)
+                if self.pause < 0:
+                    raise ValueError
+            except ValueError:
+                raise ValueError("-p / --pause parameter must be a non-negative integer")
             if self.setLanguage:
                 self.setLanguage = self.setLanguage.capitalize()
             if parameters:
@@ -356,14 +368,16 @@ class VimeoCrawler(object):
                 (f, self.errorLogFileName) = mkstemp('.log', 'VimeoCrawlerErrors-')
                 close(f)
                 self.errorHandler = FileHandler(self.errorLogFileName)
-                self.errorHandler.setFormatter(Formatter("%(operation)s\n  %(levelname)5s %(message)s", '%Y-%m-%d %H:%M:%S'))
+                self.errorHandler.setFormatter(Formatter("%(operation)s  %(levelname)5s %(message)s", '%Y-%m-%d %H:%M:%S'))
                 self.errorHandler.setLevel(WARNING)
                 class OperationFilter(Filter):
                     def __init__(self):
                         super(OperationFilter, self).__init__()
                         self.operation = None
+                        self.previousOperation = None
                     def filter(self, record):
-                        record.operation = self.operation
+                        record.operation = ('%s\n' % self.operation) if self.operation != self.previousOperation else ''
+                        self.previousOperation = self.operation
                         return True
                 self.operationFilter = OperationFilter()
                 self.errorHandler.addFilter(self.operationFilter)
@@ -597,7 +611,7 @@ class VimeoCrawler(object):
         # Parse download links
         link = linkTitle = linkSize = localSize = downloadOK = downloadSkip = None
         if download:
-            xpath = '//a[%s]' if legacyStyle else '//td[%s]'
+            xpath = './/a[%s]' if legacyStyle else './/td[%s]'
             for preference in FILE_PREFERENCES:
                 try: # exact match
                     linkTitle = download.find_element_by_xpath(xpath % ('.="%s"' % preference))
@@ -607,7 +621,7 @@ class VimeoCrawler(object):
                     except NoSuchElementException:
                         pass
                 if linkTitle:
-                    link = linkTitle if legacyStyle else linkTitle.find_element_by_xpath('//following-sibling::td/a[.="Download"]')
+                    link = linkTitle if legacyStyle else linkTitle.find_element_by_xpath('./following-sibling::td/a[.="Download"]')
                     break
         if link: # Parse chosen download link
             userAgent = str(self.driver.execute_script('return window.navigator.userAgent'))
@@ -631,7 +645,7 @@ class VimeoCrawler(object):
         self.logger.info(operation)
         self.setOperation(operation)
         if not legacyStyle:
-            self.logger.warning("New style video page detected!")
+            self.logger.debug("New style video page detected!")
         fileName = cleanupFileName('%s.%s' % (' '.join(((title.decode(CONSOLE_ENCODING),) if title else ()) + (str(vID),)), extension.lower())) # unicode
         targetFileName = encodeForFileSystem(join(self.targetDirectory, fileName))
         if self.setLanguage or self.setPreset or self.setHD:
@@ -639,6 +653,11 @@ class VimeoCrawler(object):
                 self.logger.warning("Video author is %s, skipping settings", author)
             else: # Matching author or unindentified author
                 try:
+                    if not legacyStyle:
+                        try: # Close download panel
+                            self.getElement('.modal-btn--close', fast = True).click()
+                        except:
+                            pass
                     (self.getElement('#change_settings') if legacyStyle else self.driver.find_element_by_xpath('//button//span[.="Settings"]')).click()
                     if self.setLanguage:
                         try:
@@ -649,6 +668,7 @@ class VimeoCrawler(object):
                                 if len(ls) != 1:
                                     ls = [l for l in languages if l.get_attribute('value').capitalize().startswith(self.setLanguage)]
                                 if len(ls) == 1:
+                                    self.updateCompleted = False
                                     self.logger.debug("Language not set, setting to %s", ls[0].text)
                                     ls[0].click()
                                     self.getElement('#settings_form input[type=submit]').click()
@@ -669,6 +689,7 @@ class VimeoCrawler(object):
                                 elif not radio.is_enabled():
                                     self.logger.debug("Video cannot be set to 1080p")
                                 else:
+                                    self.updateCompleted = False
                                     self.logger.debug("Setting video to 1080p")
                                     radio.click()
                                     self.getElement('#upgrade_video').click()
@@ -685,6 +706,7 @@ class VimeoCrawler(object):
                                     if checkbox.is_selected():
                                         self.logger.debug("Embed already set to HD")
                                     else:
+                                        self.updateCompleted = False
                                         self.logger.debug("Setting embed to HD")
                                         checkbox.click()
                                         self.getElement('#settings_form input[name=save_embed_settings]').click()
@@ -699,6 +721,7 @@ class VimeoCrawler(object):
                                     else:
                                         presets = [p for p in presets if p.text.capitalize() == self.setPreset]
                                         if presets:
+                                            self.updateCompleted = False
                                             self.logger.debug("Preset %s, setting to %s", ('is set to %s' % currentPreset.text.capitalize()) if currentPreset else 'is not set', self.setPreset)
                                             presets[0].click()
                                             self.getElement('#settings_form input[name=save_embed_settings]').click()
@@ -721,6 +744,7 @@ class VimeoCrawler(object):
                 if localSize == linkSize:
                     downloadOK = True
                 elif localSize > linkSize:
+                    self.updateCompleted = False
                     self.error("Local file is larger (%d) than remote file (%d)", localSize, linkSize)
                     downloadSkip = True
             if downloadOK or downloadSkip:
@@ -769,6 +793,7 @@ class VimeoCrawler(object):
                 for _ in xrange(self.retryCount):
                     try:
                         grabber.urlgrab(link, filename = targetFileName)
+                        self.updateCompleted = False
                         downloadOK = True
                         break
                     except URLGrabError, e:
@@ -783,20 +808,25 @@ class VimeoCrawler(object):
                     except KeyboardInterrupt:
                         self.logger.warning("Download interrupted")
                 else:
+                    self.updateCompleted = False
                     self.error("Download ultimately failed after %d retries", self.retryCount)
                 if downloadOK:
                     localSize = getFileSize(targetFileName)
                     if not localSize:
+                        self.updateCompleted = False
                         self.error("Downloaded file seems corrupt")
                         downloadOK = False
                     elif linkSize:
                         if localSize > linkSize:
+                            self.updateCompleted = False
                             self.error("Downloaded file larger (%d) than remote file (%d)", localSize, linkSize)
                             downloadOK = False
                         elif localSize < linkSize:
+                            self.updateCompleted = False
                             self.error("Downloaded file smaller (%d) than remote file (%d)", localSize, linkSize)
                             downloadOK = False
                         elif self.verifyContent and not self.verifyFile(targetFileName):
+                            self.updateCompleted = False
                             downloadOK = False
             if downloadOK:
                 self.logger.debug("OK")
@@ -864,7 +894,14 @@ class VimeoCrawler(object):
                 if self.getFileSizes:
                     requests.adapters.DEFAULT_RETRIES = self.retryCount
                 for (n, vID) in enumerate(self.vIDs, 1):
+                    if n > 1 and self.pause:
+                        self.logger.debug("Pause %d seconds", self.pause)
+                        sleep(self.pause)
+                    self.updateCompleted = True
                     self.processVideo(vID, n)
+                    if self.updateOnly and self.updateCompleted:
+                        self.logger.info("Update completed")
+                        break
         except Exception, e:
             self.error(format_exc() if self.verbose else e)
         finally:
