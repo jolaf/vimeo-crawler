@@ -82,7 +82,7 @@ except ImportError:
 
 isWindows = platform.lower().startswith('win')
 
-TITLE = 'VimeoCrawler v1.94 (c) 2013-2015 Vasily Zakharov vmzakhar@gmail.com'
+TITLE = 'VimeoCrawler v1.95 (c) 2013-2015 Vasily Zakharov vmzakhar@gmail.com'
 
 OPTION_NAMES = ('directory', 'login', 'max-items', 'retries', 'pause', 'set-language', 'embed-preset', 'timeout', 'webdriver')
 FIELD_NAMES = ('targetDirectory', 'credentials', 'maxItems', 'retryCount', 'pause', 'setLanguage', 'setPreset', 'timeout', 'driverName')
@@ -261,6 +261,7 @@ class VimeoCrawler(object):
         # Startup defaults
         self.startURL = None
         self.errors = 0
+        self.vIDs = []
         try:
             # Reading command line options
             (options, parameters) = getopt(args, SHORT_OPTIONS, LONG_OPTIONS)
@@ -310,6 +311,8 @@ class VimeoCrawler(object):
                     self.credentials = (self.credentials[0 : index], self.credentials[index + 1:])
                 except ValueError:
                     raise ValueError("-l / --login parameter must be formatted as follows: user.name@host.name:password")
+            else:
+                self.setLanguage = self.setPreset = self.setHD = None
             if self.maxItems:
                 try:
                     self.maxItems = int(self.maxItems)
@@ -339,13 +342,14 @@ class VimeoCrawler(object):
                 self.setLanguage = self.setLanguage.capitalize()
             if parameters:
                 try:
-                    self.vIDs = tuple(URL(p).vID for p in parameters)
-                    if None in self.vIDs: # At least one parameter is not video
-                        raise ValueError
+                    for vID in (URL(p).vID for p in parameters):
+                        if vID is None: # At least one parameter is not video
+                            raise ValueError
+                        if vID not in self.vIDs:
+                            self.vIDs.append(vID) # Remove duplicates
                     self.detectObsolete = False
                 except ValueError:
                     if len(parameters) == 1:
-                        self.vIDs = []
                         self.startURL = URL(parameters[0])
                     else:
                         raise ValueError("If multiple parameters are specified, they must all be videos")
@@ -420,12 +424,13 @@ class VimeoCrawler(object):
         self.setOperation(str(url))
         self.driver.get(url.url)
         try:
-            self.getElement("#topnav_desktop", fast = True) # Detect if this is a Vimeo page
+            self.getElement("#topnav_desktop") # Detect if this is a Vimeo page
         except NoSuchElementException:
             try: # Trying to overcome Google reCAPTCHA. To test, use self.driver.get('http://www.google.com/recaptcha/api2/demo')
                 self.getElement(".g-recaptcha")
-                self.driver.switch_to_frame(self.getElement('iframe', fast = True))
-                self.getElement('.recaptcha-checkbox-checkmark', fast = True).click()
+                self.driver.switch_to_frame(self.getElement('iframe'))
+                checkMark = self.getElement('.recaptcha-checkbox-checkmark')
+                checkMark.click()
                 self.driver.switch_to_default_content()
                 first = True
                 while True:
@@ -440,27 +445,30 @@ class VimeoCrawler(object):
                 self.logger.error("Unindentified page, retrying")
                 self.driver.get(url.url)
 
-    def getElement(self, selector, fast = False, multiple = False):
-        condition = presence_of_all_elements_located if multiple else presence_of_element_located
+    def getElement(self, selector, wait = False, multiple = False):
+        if wait:
+            try:
+                condition = presence_of_all_elements_located if multiple else presence_of_element_located
+                return WebDriverWait(self.driver, self.timeout).until(condition((By.CSS_SELECTOR, selector)))
+            except TimeoutException:
+                pass # The finder below would create and throw NoSuchElementException to be printed nicely later
         finder = self.driver.find_elements_by_css_selector if multiple else self.driver.find_element_by_css_selector
-        try:
-            if fast:
-                raise TimeoutException()
-            return WebDriverWait(self.driver, self.timeout).until(condition((By.CSS_SELECTOR, selector)))
-        except TimeoutException:
-            return finder(selector) # Would throw NoSuchElementException to be printed nicely later
+        return finder(selector)
 
-    def getElements(self, selector):
-        return self.getElement(selector, multiple = True)
+    def getElements(self, selector, wait = False):
+        return self.getElement(selector, wait = wait, multiple = True)
 
     def login(self, email, password):
         self.goTo('http://vimeo.com/log_in')
         self.logger.info("Logging in as %s...", email)
         try:
-            self.getElement('#signup_email').send_keys(email)
-            self.getElement('#login_password').send_keys(password)
-            self.getElement('#login_form input[type=submit]').click()
-            welcomeLink = self.getElement('#page_header h1 a')
+            emailInput = self.getElement('#signup_email')
+            emailInput.send_keys(email)
+            passwordInput = self.getElement('#login_password')
+            passwordInput.send_keys(password)
+            submitButton = self.getElement('#login_form input[type=submit]')
+            submitButton.click()
+            welcomeLink = self.getElement('#page_header h1 a', wait = True)
             userName = welcomeLink.text.strip()
             self.logger.info("Logged in as %s...", userName)
             welcomeLink.click()
@@ -499,7 +507,8 @@ class VimeoCrawler(object):
             items.extend(self.getItemsFromPage())
             numPages += 1
             try:
-                self.getElement('.pagination a[rel=next]', fast = True).click()
+                nextButton = self.getElement('.pagination a[rel=next]')
+                nextButton.click()
             except NoSuchElementException:
                 break
         items = tuple(items)
@@ -536,16 +545,16 @@ class VimeoCrawler(object):
             title = None
             self.goTo(url)
             try:
-                title = self.getElement('#page_header h1 a', fast = True).text # https://vimeo.com/channels/*/videos
+                title = self.getElement('#page_header h1 a').text # https://vimeo.com/channels/*/videos
             except NoSuchElementException:
                 try:
-                    title = self.getElement('#page_header h1', fast = True).text # https://vimeo.com/album/*
+                    title = self.getElement('#page_header h1').text # https://vimeo.com/album/*
                 except NoSuchElementException:
                     try:
-                        title = self.getElement('#group_header h1 a', fast = True).get_attribute('title') # https://vimeo.com/groups/*/videos
+                        title = self.getElement('#group_header h1 a').get_attribute('title') # https://vimeo.com/groups/*/videos
                     except NoSuchElementException:
                         try:
-                            title = self.getElement('#group_header h1 a', fast = True).text # backup
+                            title = self.getElement('#group_header h1 a').text # backup
                         except NoSuchElementException, e:
                             self.logger.error(e.msg)
             if title:
@@ -591,7 +600,7 @@ class VimeoCrawler(object):
                 legacyStyle = False
             title = encodeForConsole(titleElement.text.strip().rstrip('.'))
             try: # Check if video is private
-                isPrivate = self.getElement('.private' if legacyStyle else 'h1.clip_info-header span[title="Password Protected"]', fast = True)
+                isPrivate = self.getElement('.private' if legacyStyle else 'h1.clip_info-header span[title="Password Protected"]')
             except NoSuchElementException:
                 pass
             try:
@@ -601,8 +610,9 @@ class VimeoCrawler(object):
                 self.error("Failed to identify author")
                 author = None
             try:
-                (self.getElement('.iconify_down_b', fast = True) if legacyStyle else self.driver.find_element_by_xpath('//button//span[.="Download"]')).click()
-                download = self.getElement('#download' if legacyStyle else "#download_panel", fast = True)
+                downloadButton = self.getElement('.iconify_down_b') if legacyStyle else self.driver.find_element_by_xpath('//button//span[.="Download"]')
+                downloadButton.click()
+                download = self.getElement('#download' if legacyStyle else "#download_panel")
             except NoSuchElementException, e:
                 pass
         except NoSuchElementException, e:
@@ -650,15 +660,17 @@ class VimeoCrawler(object):
         targetFileName = encodeForFileSystem(join(self.targetDirectory, fileName))
         if self.setLanguage or self.setPreset or self.setHD:
             if author:
-                self.logger.warning("Video author is %s, skipping settings", author)
+                self.logger.warning("Different video author, skipping settings")
             else: # Matching author or unindentified author
                 try:
                     if not legacyStyle:
                         try: # Close download panel
-                            self.getElement('.modal-btn--close', fast = True).click()
+                            closeButton = self.getElement('.modal-btn--close')
+                            closeButton.click()
                         except:
                             pass
-                    (self.getElement('#change_settings') if legacyStyle else self.driver.find_element_by_xpath('//button//span[.="Settings"]')).click()
+                    settingsButton = self.getElement('#change_settings') if legacyStyle else self.driver.find_element_by_xpath('//button//span[.="Settings"]')
+                    settingsButton.click()
                     if self.setLanguage:
                         try:
                             languages = self.getElements('select[name=language] option')
@@ -671,7 +683,8 @@ class VimeoCrawler(object):
                                     self.updateCompleted = False
                                     self.logger.debug("Language not set, setting to %s", ls[0].text)
                                     ls[0].click()
-                                    self.getElement('#settings_form input[type=submit]').click()
+                                    submitButton = self.getElement('#settings_form input[type=submit]')
+                                    submitButton.click()
                                 else:
                                     self.error("Unsupported language: %s", self.setLanguage)
                                     self.setLanguage = None
@@ -681,7 +694,8 @@ class VimeoCrawler(object):
                             self.error("Failed to set language to %s", self.setLanguage)
                     if self.setHD:
                         try:
-                            self.getElement('#tabs a[title="Video File"]').click()
+                            videoFileTab = self.getElement('#tabs a[title="Video File"]')
+                            videoFileTab.click()
                             try:
                                 radio = self.getElement('#hd_profile_1080')
                                 if radio.is_selected():
@@ -692,14 +706,16 @@ class VimeoCrawler(object):
                                     self.updateCompleted = False
                                     self.logger.debug("Setting video to 1080p")
                                     radio.click()
-                                    self.getElement('#upgrade_video').click()
+                                    upgradeVideoButton = self.getElement('#upgrade_video')
+                                    upgradeVideoButton.click()
                             except NoSuchElementException:
                                 self.error("Failed to set video to 1080p")
                         except NoSuchElementException:
                             self.error("Failed to access Video File settings")
                     if self.setPreset or self.setHD:
                         try:
-                            self.getElement('#tabs a[title=Embed]').click()
+                            embedTab = self.getElement('#tabs a[title=Embed]')
+                            embedTab.click()
                             if self.setHD:
                                 try:
                                     checkbox = self.getElement('input[name=allow_hd_embed]')
@@ -709,7 +725,8 @@ class VimeoCrawler(object):
                                         self.updateCompleted = False
                                         self.logger.debug("Setting embed to HD")
                                         checkbox.click()
-                                        self.getElement('#settings_form input[name=save_embed_settings]').click()
+                                        saveEmbedSettingsButton = self.getElement('#settings_form input[name=save_embed_settings]')
+                                        saveEmbedSettingsButton.click()
                                 except NoSuchElementException:
                                     self.error("Failed to set playback to HD")
                             if self.setPreset:
@@ -724,7 +741,8 @@ class VimeoCrawler(object):
                                             self.updateCompleted = False
                                             self.logger.debug("Preset %s, setting to %s", ('is set to %s' % currentPreset.text.capitalize()) if currentPreset else 'is not set', self.setPreset)
                                             presets[0].click()
-                                            self.getElement('#settings_form input[name=save_embed_settings]').click()
+                                            saveEmbedSettingsButton = self.getElement('#settings_form input[name=save_embed_settings]')
+                                            saveEmbedSettingsButton.click()
                                         else:
                                             self.error("Unknown preset: %s", self.setPreset)
                                             self.setPreset = None
