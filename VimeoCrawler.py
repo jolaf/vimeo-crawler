@@ -82,7 +82,7 @@ except ImportError:
 
 isWindows = platform.lower().startswith('win')
 
-TITLE = 'VimeoCrawler v1.95 (c) 2013-2015 Vasily Zakharov vmzakhar@gmail.com'
+TITLE = 'VimeoCrawler v1.96 (c) 2013-2015 Vasily Zakharov vmzakhar@gmail.com'
 
 OPTION_NAMES = ('directory', 'login', 'max-items', 'retries', 'pause', 'set-language', 'embed-preset', 'timeout', 'webdriver')
 FIELD_NAMES = ('targetDirectory', 'credentials', 'maxItems', 'retryCount', 'pause', 'setLanguage', 'setPreset', 'timeout', 'driverName')
@@ -503,7 +503,7 @@ class VimeoCrawler(object):
     def getItemsFromFolder(self):
         items = []
         numPages = 0
-        for _ in xrange(self.maxItems) if self.maxItems != None else count():
+        for _ in xrange(self.maxItems) if self.maxItems is not None else count():
             items.extend(self.getItemsFromPage())
             numPages += 1
             try:
@@ -526,7 +526,7 @@ class VimeoCrawler(object):
         if url.isVideo: # Video
             if url.vID not in self.vIDs:
                 self.vIDs.append(url.vID)
-            if target != None:
+            if target is not None:
                 target.add(url.vID)
         elif url.isAccount: # Account main page
             self.logger.info("Processing account %s...", url.account)
