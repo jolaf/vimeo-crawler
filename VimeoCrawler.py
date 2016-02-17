@@ -21,6 +21,7 @@ try: # Selenium configuration
     from selenium import webdriver
     from selenium.common.exceptions import NoSuchElementException, TimeoutException
     from selenium.webdriver.common.by import By
+    from selenium.webdriver.common.keys import Keys
     from selenium.webdriver.support.expected_conditions import presence_of_element_located, presence_of_all_elements_located
     from selenium.webdriver.support.ui import WebDriverWait
     DRIVERS = dict((v.lower(), (v, getattr(webdriver, v))) for v in vars(webdriver) if v[0].isupper()) # ToDo: Make this list more precise
@@ -82,7 +83,7 @@ except ImportError:
 
 isWindows = platform.lower().startswith('win')
 
-TITLE = 'VimeoCrawler v1.96 (c) 2013-2015 Vasily Zakharov vmzakhar@gmail.com'
+TITLE = 'VimeoCrawler v1.97 (c) 2013-2016 Vasily Zakharov vmzakhar@gmail.com'
 
 OPTION_NAMES = ('directory', 'login', 'max-items', 'retries', 'pause', 'set-language', 'embed-preset', 'timeout', 'webdriver')
 FIELD_NAMES = ('targetDirectory', 'credentials', 'maxItems', 'retryCount', 'pause', 'setLanguage', 'setPreset', 'timeout', 'driverName')
@@ -376,7 +377,7 @@ class VimeoCrawler(object):
                 self.errorHandler.setLevel(WARNING)
                 class OperationFilter(Filter):
                     def __init__(self):
-                        super(OperationFilter, self).__init__()
+                        Filter.__init__(self) # pylint: disable=W0233
                         self.operation = None
                         self.previousOperation = None
                     def filter(self, record):
@@ -446,13 +447,18 @@ class VimeoCrawler(object):
                 self.driver.get(url.url)
 
     def getElement(self, selector, wait = False, multiple = False):
+        isXpath = selector.startswith('//')
         if wait:
             try:
                 condition = presence_of_all_elements_located if multiple else presence_of_element_located
-                return WebDriverWait(self.driver, self.timeout).until(condition((By.CSS_SELECTOR, selector)))
+                by = By.XPATH if isXpath else By.CSS_SELECTOR
+                return WebDriverWait(self.driver, self.timeout).until(condition((by, selector)))
             except TimeoutException:
                 pass # The finder below would create and throw NoSuchElementException to be printed nicely later
-        finder = self.driver.find_elements_by_css_selector if multiple else self.driver.find_element_by_css_selector
+        if isXpath:
+            finder = self.driver.find_elements_by_xpath if multiple else self.driver.find_element_by_xpath
+        else:
+            finder = self.driver.find_elements_by_css_selector if multiple else self.driver.find_element_by_css_selector
         return finder(selector)
 
     def getElements(self, selector, wait = False):
@@ -610,7 +616,7 @@ class VimeoCrawler(object):
                 self.error("Failed to identify author")
                 author = None
             try:
-                downloadButton = self.getElement('.iconify_down_b') if legacyStyle else self.driver.find_element_by_xpath('//button//span[.="Download"]')
+                downloadButton = self.getElement('.iconify_down_b') if legacyStyle else self.getElement('//button//span[.="Download"]')
                 downloadButton.click()
                 download = self.getElement('#download' if legacyStyle else "#download_panel")
             except NoSuchElementException, e:
@@ -654,23 +660,21 @@ class VimeoCrawler(object):
         operation = '%d %s%s (%s) %d/%d %d%%%s' % (vID, title, ' [P]' if isPrivate else (' [%s]' % author) if author else '', description, number, len(self.vIDs), int(number * 100.0 / len(self.vIDs)), (' %s' % readableSize(self.totalFileSize)) if self.totalFileSize else '')
         self.logger.info(operation)
         self.setOperation(operation)
-        if not legacyStyle:
-            self.logger.debug("New style video page detected!")
         fileName = cleanupFileName('%s.%s' % (' '.join(((title.decode(CONSOLE_ENCODING),) if title else ()) + (str(vID),)), extension.lower())) # unicode
         targetFileName = encodeForFileSystem(join(self.targetDirectory, fileName))
+        if not legacyStyle:
+            download.send_keys(Keys.ESCAPE)
         if self.setLanguage or self.setPreset or self.setHD:
             if author:
                 self.logger.warning("Different video author, skipping settings")
             else: # Matching author or unindentified author
                 try:
-                    if not legacyStyle:
-                        try: # Close download panel
-                            closeButton = self.getElement('.modal-btn--close')
-                            closeButton.click()
-                        except:
-                            pass
-                    settingsButton = self.getElement('#change_settings') if legacyStyle else self.driver.find_element_by_xpath('//button//span[.="Settings"]')
-                    settingsButton.click()
+                    if legacyStyle:
+                        settingsButton = self.getElement('#change_settings')
+                        settingsButton.click()
+                    else:
+                        settingsButton = self.getElement('//button//span[.="Settings"]')
+                        self.driver.execute_script("arguments[0].click()", settingsButton)
                     if self.setLanguage:
                         try:
                             languages = self.getElements('select[name=language] option')
