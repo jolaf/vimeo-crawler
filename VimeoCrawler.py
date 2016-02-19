@@ -83,7 +83,7 @@ except ImportError:
 
 isWindows = platform.lower().startswith('win')
 
-TITLE = 'VimeoCrawler v1.97 (c) 2013-2016 Vasily Zakharov vmzakhar@gmail.com'
+TITLE = 'VimeoCrawler v1.98 (c) 2013-2016 Vasily Zakharov vmzakhar@gmail.com'
 
 OPTION_NAMES = ('directory', 'login', 'max-items', 'retries', 'pause', 'set-language', 'embed-preset', 'timeout', 'webdriver')
 FIELD_NAMES = ('targetDirectory', 'credentials', 'maxItems', 'retryCount', 'pause', 'setLanguage', 'setPreset', 'timeout', 'driverName')
@@ -464,6 +464,9 @@ class VimeoCrawler(object):
     def getElements(self, selector, wait = False):
         return self.getElement(selector, wait = wait, multiple = True)
 
+    def jsClick(self, element):
+        self.driver.execute_script("arguments[0].click()", element)
+
     def login(self, email, password):
         self.goTo('http://vimeo.com/log_in')
         self.logger.info("Logging in as %s...", email)
@@ -616,8 +619,12 @@ class VimeoCrawler(object):
                 self.error("Failed to identify author")
                 author = None
             try:
-                downloadButton = self.getElement('.iconify_down_b') if legacyStyle else self.getElement('//button//span[.="Download"]')
-                downloadButton.click()
+                if legacyStyle:
+                    downloadButton = self.getElement('.iconify_down_b')
+                    downloadButton.click()
+                else:
+                    downloadButton = self.getElement('//button//span[.="Download"]', wait = True)
+                    self.jsClick(downloadButton)
                 download = self.getElement('#download' if legacyStyle else "#download_panel")
             except NoSuchElementException, e:
                 pass
@@ -674,7 +681,7 @@ class VimeoCrawler(object):
                         settingsButton.click()
                     else:
                         settingsButton = self.getElement('//button//span[.="Settings"]')
-                        self.driver.execute_script("arguments[0].click()", settingsButton)
+                        self.jsClick(settingsButton)
                     if self.setLanguage:
                         try:
                             languages = self.getElements('select[name=language] option')
@@ -732,7 +739,7 @@ class VimeoCrawler(object):
                                         saveEmbedSettingsButton = self.getElement('#settings_form input[name=save_embed_settings]')
                                         saveEmbedSettingsButton.click()
                                 except NoSuchElementException:
-                                    self.error("Failed to set playback to HD")
+                                    self.logger.debug("Embed HD setting is not available")
                             if self.setPreset:
                                 try:
                                     presets = self.getElements("select#preset option")
