@@ -16,8 +16,8 @@ stdout = fdopen(stdout.fileno(), 'w', 0)
 
 try: # Selenium configuration
     import selenium
-    if tuple(int(v) for v in selenium.__version__.split('.')) < (2, 45):
-        raise ImportError('Selenium version %s < 2.45' % selenium.__version__)
+    if tuple(int(v) for v in selenium.__version__.split('.')) < (2, 48):
+        raise ImportError('Selenium version %s < 2.48' % selenium.__version__)
     from selenium import webdriver
     from selenium.common.exceptions import NoSuchElementException, TimeoutException
     from selenium.webdriver.common.by import By
@@ -83,7 +83,7 @@ except ImportError:
 
 isWindows = platform.lower().startswith('win')
 
-TITLE = 'VimeoCrawler v1.98 (c) 2013-2016 Vasily Zakharov vmzakhar@gmail.com'
+TITLE = 'VimeoCrawler v2.0 (c) 2013-2016 Vasily Zakharov vmzakhar@gmail.com'
 
 OPTION_NAMES = ('directory', 'login', 'max-items', 'retries', 'pause', 'set-language', 'embed-preset', 'timeout', 'webdriver')
 FIELD_NAMES = ('targetDirectory', 'credentials', 'maxItems', 'retryCount', 'pause', 'setLanguage', 'setPreset', 'timeout', 'driverName')
@@ -231,7 +231,7 @@ class URL(object):
         return hash(self.url)
 
     def __cmp__(self, other):
-        return 1 if self.url > other.url else -1 if self.url < other.url else 0
+        return cmp(self.url, other.url)
 
 class VimeoCrawler(object):
     def __init__(self, args):
@@ -354,10 +354,10 @@ class VimeoCrawler(object):
                         self.startURL = URL(parameters[0])
                     else:
                         raise ValueError("If multiple parameters are specified, they must all be videos")
-            elif not self.credentials:
-                raise ValueError("Neither login credentials nor start URL is specified")
-            else:
+            elif self.credentials:
                 self.vIDs = []
+            else:
+                raise ValueError("Neither login credentials nor start URL is specified")
             # Creating target directory
             self.createDir()
             if self.startURL:
@@ -484,7 +484,6 @@ class VimeoCrawler(object):
             self.getElement('#content')
             self.loggedIn = True
             self.userName = userName
-            return
         except NoSuchElementException, e:
             self.error("Login failed: %s", e)
 
@@ -669,7 +668,7 @@ class VimeoCrawler(object):
         self.setOperation(operation)
         fileName = cleanupFileName('%s.%s' % (' '.join(((title.decode(CONSOLE_ENCODING),) if title else ()) + (str(vID),)), extension.lower())) # unicode
         targetFileName = encodeForFileSystem(join(self.targetDirectory, fileName))
-        if not legacyStyle:
+        if not legacyStyle and download:
             download.send_keys(Keys.ESCAPE)
         if self.setLanguage or self.setPreset or self.setHD:
             if author:
