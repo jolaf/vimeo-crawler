@@ -1,4 +1,5 @@
 #!/usr/bin/python
+from codecs import open as codecsOpen
 from getopt import getopt
 from itertools import count
 from logging import getLogger, FileHandler, StreamHandler, Filter, Formatter, DEBUG, INFO, WARNING
@@ -83,7 +84,7 @@ except ImportError:
 
 isWindows = platform.lower().startswith('win')
 
-TITLE = 'VimeoCrawler v2.0 (c) 2013-2016 Vasily Zakharov vmzakhar@gmail.com'
+TITLE = 'VimeoCrawler v2.01a (c) 2013-2016 Vasily Zakharov vmzakhar@gmail.com'
 
 OPTION_NAMES = ('directory', 'login', 'max-items', 'retries', 'pause', 'set-language', 'embed-preset', 'timeout', 'webdriver')
 FIELD_NAMES = ('targetDirectory', 'credentials', 'maxItems', 'retryCount', 'pause', 'setLanguage', 'setPreset', 'timeout', 'driverName')
@@ -152,6 +153,8 @@ VIDEOS_LINKS = ('videos') # http://vimeo.com/account/videos
 FOLDERS_LINKS = ('album', 'groups', 'channels') # http://vimeo.com/folder/*
 FOLDER_NAMES = {'albums': 'album', 'groups': 'group', 'channels': 'channel'} # Mapping to singular for printing
 FILE_PREFERENCES = ('Original', '1080p', '720p', 'On2 HD', 'HD', 'On2 SD', 'SD') # Vimeo file versions names
+
+BG_IMAGE_PATTERN = reCompile(r'(?i).*url\(\s*[\'"]?\s*(.*?)\s*[\'"]?\s*\)') # url("https://i.vimeocdn.com/video/52925938.jpg?mw=960&mh=540")
 
 UNITS = ('bytes', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB')
 def readableSize(size):
@@ -617,6 +620,29 @@ class VimeoCrawler(object):
             except NoSuchElementException:
                 self.error("Failed to identify author")
                 author = None
+            if legacyStyle:
+                self.error("Can't extract video description from a legacy style page")
+                detailsText = ''
+                videoThumbnailLink = None
+            else:
+                try:
+                    readMore = self.getElement('.clip_details-more')
+                    readMore.click()
+                except NoSuchElementException:
+                    pass # Read More label will be absent if details is short
+                try:
+                    detailsBlock = self.getElement('.iris_desc-content')
+                    detailsText = detailsBlock.get_attribute('innerHTML')
+                except NoSuchElementException:
+                    self.error("Failed to get video description")
+                    detailsText = None
+                try:
+                    videoWrapper = self.getElement('.video-wrapper .video')
+                    videoWrapperBackground = videoWrapper.value_of_css_property('background-image')
+                    videoThumbnailLink = BG_IMAGE_PATTERN.match(videoWrapperBackground).group(1)
+                except NoSuchElementException:
+                    self.error("Failed to get video thumbnail URL")
+                    videoThumbnailLink = None
             try:
                 if legacyStyle:
                     downloadButton = self.getElement('.iconify_down_b')
@@ -666,8 +692,9 @@ class VimeoCrawler(object):
         operation = '%d %s%s (%s) %d/%d %d%%%s' % (vID, title, ' [P]' if isPrivate else (' [%s]' % author) if author else '', description, number, len(self.vIDs), int(number * 100.0 / len(self.vIDs)), (' %s' % readableSize(self.totalFileSize)) if self.totalFileSize else '')
         self.logger.info(operation)
         self.setOperation(operation)
-        fileName = cleanupFileName('%s.%s' % (' '.join(((title.decode(CONSOLE_ENCODING),) if title else ()) + (str(vID),)), extension.lower())) # unicode
-        targetFileName = encodeForFileSystem(join(self.targetDirectory, fileName))
+        fileNameBase = cleanupFileName(' '.join(((title.decode(CONSOLE_ENCODING),) if title else ()) + (str(vID),))) # unicode
+        (videoFileName, thumbnailFileName, detailsFileName) = ('%s.%s' % (fileNameBase, ext) for ext in (extension.lower(), 'jpg', 'html')) # unicode
+        (targetVideoFileName, targetThumbnailFileName, targetDetailsFileName) = (encodeForFileSystem(join(self.targetDirectory, fileName)) for fileName in (videoFileName, thumbnailFileName, detailsFileName))
         if not legacyStyle and download:
             download.send_keys(Keys.ESCAPE)
         if self.setLanguage or self.setPreset or self.setHD:
@@ -762,13 +789,36 @@ class VimeoCrawler(object):
                             self.error("Failed to access Embed settings")
                 except NoSuchElementException:
                     self.error("Failed to access settings")
+        # Saving video details
+        self.logger.debug("Saving video details")
+        try:
+            with codecsOpen(targetDetailsFileName, 'w', 'UTF-8') as f:
+                f.write(detailsText)
+        except IOError, e:
+            self.logger.warning("Error saving details text: %s", e)
+        # Saving video thumbnail
+        if videoThumbnailLink:
+            self.logger.debug("Getting thumbnail image")
+            try:
+                grabber = URLGrabber(reget = 'simple', timeout = self.timeout, user_agent = userAgent,
+                                     http_headers = tuple((str(cookie['name']), str(cookie['value'])) for cookie in cookies))
+                grabber.urlgrab(videoThumbnailLink, filename = targetThumbnailFileName)
+            except URLGrabError, e:
+                if e.errno == 14 and e.code == 22:
+                    httpError = HTTP_ERROR_PATTERN.match(e.strerror).group(1)
+                    if not self.getFileSizes and ' 416 ' in httpError:
+                        pass # ok
+                    else:
+                        self.logger.warning("Video thumbnail download failed: %s", httpError)
+                else:
+                    self.logger.warning("Video thumbnail download failed: %s", e.strerror if e.errno == 14 else e)
         if not download:
             self.logger.warning("Download function not available")
         elif not link:
             self.error("Failed to obtain download link")
         else: # Downloading file
             if linkSize:
-                localSize = getFileSize(targetFileName)
+                localSize = getFileSize(targetVideoFileName)
                 if localSize == linkSize:
                     downloadOK = True
                 elif localSize > linkSize:
@@ -776,7 +826,7 @@ class VimeoCrawler(object):
                     self.error("Local file is larger (%d) than remote file (%d)", localSize, linkSize)
                     downloadSkip = True
             if downloadOK or downloadSkip:
-                if self.verifyExisting and not self.verifyFile(targetFileName):
+                if self.verifyExisting and not self.verifyFile(targetVideoFileName):
                     downloadOK = False
             elif self.doDownload:
                 timeout = self.timeout
@@ -816,11 +866,11 @@ class VimeoCrawler(object):
                         self.update(totalRead, 'OK')
 
                 progressIndicator = ProgressIndicator()
-                grabber = URLGrabber(reget = 'simple', timeout = self.timeout, progress_obj = progressIndicator,
-                    user_agent = userAgent, http_headers = tuple((str(cookie['name']), str(cookie['value'])) for cookie in cookies))
+                grabber = URLGrabber(reget = 'simple', timeout = self.timeout, progress_obj = progressIndicator, user_agent = userAgent,
+                                     http_headers = tuple((str(cookie['name']), str(cookie['value'])) for cookie in cookies))
                 for _ in xrange(self.retryCount):
                     try:
-                        grabber.urlgrab(link, filename = targetFileName)
+                        grabber.urlgrab(link, filename = targetVideoFileName)
                         self.updateCompleted = False
                         downloadOK = True
                         break
@@ -839,7 +889,7 @@ class VimeoCrawler(object):
                     self.updateCompleted = False
                     self.error("Download ultimately failed after %d retries", self.retryCount)
                 if downloadOK:
-                    localSize = getFileSize(targetFileName)
+                    localSize = getFileSize(targetVideoFileName)
                     if not localSize:
                         self.updateCompleted = False
                         self.error("Downloaded file seems corrupt")
@@ -853,7 +903,7 @@ class VimeoCrawler(object):
                             self.updateCompleted = False
                             self.error("Downloaded file smaller (%d) than remote file (%d)", localSize, linkSize)
                             downloadOK = False
-                        elif self.verifyContent and not self.verifyFile(targetFileName):
+                        elif self.verifyContent and not self.verifyFile(targetVideoFileName):
                             self.updateCompleted = False
                             downloadOK = False
             if downloadOK:
@@ -862,14 +912,14 @@ class VimeoCrawler(object):
                 self.logger.debug("Download SKIPPED")
         # Creating symbolic links, if enabled
         for dirName in (dirName for (dirName, vIDs) in self.folders if vID in vIDs):
-            linkFileName = join(dirName, fileName) # unicode
+            linkFileName = join(dirName, videoFileName) # unicode
             try:
                 if lexists(linkFileName):
                     remove(linkFileName)
             except:
                 pass
             try:
-                (hardlink if self.useHardLinks else symlink)(join('..', fileName), linkFileName)
+                (hardlink if self.useHardLinks else symlink)(join('..', videoFileName), linkFileName)
             except Exception, e:
                 self.error("Can't create link at %s: %s", encodeForConsole(linkFileName), e)
 
