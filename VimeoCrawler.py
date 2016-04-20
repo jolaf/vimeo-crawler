@@ -12,13 +12,17 @@ from tempfile import mkstemp
 from time import sleep, time
 from traceback import format_exc
 
+# ToDo: Unify urlgrabber operations
+# ToDo: Download HD mp4 video version also
+# ToDo: Add option for that
+
 # Console output encoding and buffering problems fixing
 stdout = fdopen(stdout.fileno(), 'w', 0)
 
 try: # Selenium configuration
     import selenium
-    if tuple(int(v) for v in selenium.__version__.split('.')) < (2, 48):
-        raise ImportError('Selenium version %s < 2.48' % selenium.__version__)
+    if tuple(int(v) for v in selenium.__version__.split('.')) < (2, 53):
+        raise ImportError('Selenium version %s < 2.53' % selenium.__version__)
     from selenium import webdriver
     from selenium.common.exceptions import NoSuchElementException, TimeoutException
     from selenium.webdriver.common.by import By
@@ -27,7 +31,7 @@ try: # Selenium configuration
     from selenium.webdriver.support.ui import WebDriverWait
     DRIVERS = dict((v.lower(), (v, getattr(webdriver, v))) for v in vars(webdriver) if v[0].isupper()) # ToDo: Make this list more precise
 except ImportError, ex:
-    print "%s: %s\nERROR: This software requires Selenium.\nPlease install Selenium v2.45 or later: https://pypi.python.org/pypi/selenium\n" % (ex.__class__.__name__, ex)
+    print "%s: %s\nERROR: This software requires Selenium.\nPlease install Selenium v2.53 or later: https://pypi.python.org/pypi/selenium\n" % (ex.__class__.__name__, ex)
     sysExit(-1)
 
 try: # pycurl downloader library, required by urlgrabber
@@ -64,7 +68,15 @@ try: # Requests HTTP library, used to get remote file size
         raise ImportError('Requests version %s < 2.3.0' % requests.__version__)
 except ImportError, ex:
     requests = None
-    print "%s: %s\nWARNING: Video size information will not be available.\nPlease install Requests v2.3.0 or later: https://pypi.python.org/pypi/requests\n" % (ex.__class__.__name__, ex)
+    print "%s: %s\nWARNING: Video file size information will not be available.\nPlease install Requests v2.3.0 or later: https://pypi.python.org/pypi/requests\n" % (ex.__class__.__name__, ex)
+
+try:
+    from PIL.Image import VERSION as __PIL_version__, open as imageOpen
+    if tuple(int(v) for v in __PIL_version__.split('.')) < (1, 1, 7):
+        raise ImportError('PIL version %s < 1.1.7' % requests.__version__)
+except ImportError, ex:
+    imageOpen = None
+    print "%s: %s\nWARNING: Video thumbnail image verification will not be available.\nPlease install Pillow v3.2.0 or later: https://pypi.python.org/pypi/Pillow\n" % (ex.__class__.__name__, ex)
 
 try: # Filesystem symbolic links configuration
     from os import link as hardlink, symlink # UNIX # pylint: disable=E0611
@@ -84,12 +96,12 @@ except ImportError:
 
 isWindows = platform.lower().startswith('win')
 
-TITLE = 'VimeoCrawler v2.01a (c) 2013-2016 Vasily Zakharov vmzakhar@gmail.com'
+TITLE = 'VimeoCrawler v2.1 (c) 2013-2016 Vasily Zakharov vmzakhar@gmail.com'
 
 OPTION_NAMES = ('directory', 'login', 'max-items', 'retries', 'pause', 'set-language', 'embed-preset', 'timeout', 'webdriver')
 FIELD_NAMES = ('targetDirectory', 'credentials', 'maxItems', 'retryCount', 'pause', 'setLanguage', 'setPreset', 'timeout', 'driverName')
 SHORT_OPTIONS = ''.join(('%c:' % option[0]) for option in OPTION_NAMES) + 'hvunfzcxo'
-LONG_OPTIONS = tuple(('%s=' % option) for option in OPTION_NAMES) + ('help', 'verbose', 'update', 'no-download', 'no-folders', 'no-filesize', 'verify-content', 'verify-existing', 'detect-obsolete', 'hard-links', 'hd')
+LONG_OPTIONS = tuple(('%s=' % option) for option in OPTION_NAMES) + ('help', 'verbose', 'update', 'no-download', 'no-folders', 'no-filesize', 'verify-content', 'verify-existing', 'detect-obsolete', 'hard-links', 'thumbnails', 'details', 'hd')
 OPTION_PATTERNS = tuple(reCompile(pattern) for pattern in (r'-([^-\s])', r'--(\S+)'))
 
 USAGE_INFO = '''Usage: python VimeoCrawler.py [options] [startURL|videoID videoID ...]
@@ -112,6 +124,8 @@ Options:
 -f --no-folders - Do not create subfolders with links for channels and albums.
 -z --no-filesize - Do not get file sizes for videos (speeds up crawling a bit).
    --hard-links - Use hard links instead of symbolic links in subfolders.
+   --thumbnails - Save video thumbnail images.
+   --details - Save HTML video details.
 
 -l --login - Vimeo login credentials, formatted as email:password.
 -d --directory - Target directory to save all the output files to, default is the current directory.
@@ -152,7 +166,7 @@ CATEGORIES_LINKS = ('albums', 'groups', 'channels') # http://vimeo.com/account/c
 VIDEOS_LINKS = ('videos') # http://vimeo.com/account/videos
 FOLDERS_LINKS = ('album', 'groups', 'channels') # http://vimeo.com/folder/*
 FOLDER_NAMES = {'albums': 'album', 'groups': 'group', 'channels': 'channel'} # Mapping to singular for printing
-FILE_PREFERENCES = ('Original', '1080p', '720p', 'On2 HD', 'HD', 'On2 SD', 'SD') # Vimeo file versions names
+FILE_PREFERENCES = ('Original', '1080p60', '1080p', '720p60', '720p', 'On2 HD', 'HD', 'On2 SD', 'SD') # Vimeo file versions names
 
 BG_IMAGE_PATTERN = reCompile(r'(?i).*url\(\s*[\'"]?\s*(.*?)\s*[\'"]?\s*\)') # url("https://i.vimeocdn.com/video/52925938.jpg?mw=960&mh=540")
 
@@ -245,6 +259,8 @@ class VimeoCrawler(object):
         self.foldersNeeded = True
         self.getFileSizes = bool(requests)
         self.useHardLinks = False
+        self.saveThumbnails= False
+        self.saveDetails = False
         self.setHD = False
         self.verifyContent = False
         self.verifyExisting = False
@@ -290,6 +306,10 @@ class VimeoCrawler(object):
                     self.detectObsolete = True
                 elif option in ('--hard-links',):
                     self.useHardLinks = True
+                elif option in ('--thumbnails',):
+                    self.saveThumbnails= True
+                elif option in ('--details',):
+                    self.saveDetails = True
                 elif option in ('--hd',):
                     self.setHD = True
                 else: # Parsing options with arguments
@@ -585,7 +605,7 @@ class VimeoCrawler(object):
         for item in items:
             self.getItemsFromURL(item, target)
 
-    def verifyFile(self, fileName):
+    def verifyVideoFile(self, fileName):
         self.logger.debug("Verifying...")
         subprocess = Popen('ffmpeg -v error -i "%s" -f null -' % fileName, shell = True, stdout = PIPE, stderr = STDOUT)
         output = subprocess.communicate()[0]
@@ -596,6 +616,18 @@ class VimeoCrawler(object):
             self.logger.warning("Verification issue: %s", '\n'.join([s for s in output.splitlines() if "Last message repeated" not in s][-4:]))
             return False
         return True
+
+    def createLink(self, dirName, fileName):
+        linkFileName = join(dirName, fileName) # unicode
+        try:
+            if lexists(linkFileName):
+                remove(linkFileName)
+        except:
+            pass
+        try:
+            (hardlink if self.useHardLinks else symlink)(join('..', fileName), linkFileName)
+        except Exception, e:
+            self.error("Can't create link at %s: %s", encodeForConsole(linkFileName), e)
 
     def processVideo(self, vID, number):
         title = ''
@@ -620,29 +652,29 @@ class VimeoCrawler(object):
             except NoSuchElementException:
                 self.error("Failed to identify author")
                 author = None
+            detailsText = ''
+            videoThumbnailLink = None
             if legacyStyle:
                 self.error("Can't extract video description from a legacy style page")
-                detailsText = ''
-                videoThumbnailLink = None
             else:
-                try:
-                    readMore = self.getElement('.clip_details-more')
-                    readMore.click()
-                except NoSuchElementException:
-                    pass # Read More label will be absent if details is short
-                try:
-                    detailsBlock = self.getElement('.iris_desc-content')
-                    detailsText = detailsBlock.get_attribute('innerHTML')
-                except NoSuchElementException:
-                    self.error("Failed to get video description")
-                    detailsText = None
-                try:
-                    videoWrapper = self.getElement('.video-wrapper .video')
-                    videoWrapperBackground = videoWrapper.value_of_css_property('background-image')
-                    videoThumbnailLink = BG_IMAGE_PATTERN.match(videoWrapperBackground).group(1)
-                except NoSuchElementException:
-                    self.error("Failed to get video thumbnail URL")
-                    videoThumbnailLink = None
+                if self.saveDetails:
+                    try:
+                        readMore = self.getElement('.clip_details-more')
+                        readMore.click()
+                    except NoSuchElementException:
+                        pass # Read More label will be absent if details is short
+                    try:
+                        detailsBlock = self.getElement('.iris_desc-content')
+                        detailsText = detailsBlock.get_attribute('innerHTML')
+                    except NoSuchElementException:
+                        self.error("Failed to get video description")
+                if self.saveThumbnails:
+                    try:
+                        videoWrapper = self.getElement('.video-wrapper .video')
+                        videoWrapperBackground = videoWrapper.value_of_css_property('background-image')
+                        videoThumbnailLink = BG_IMAGE_PATTERN.match(videoWrapperBackground).group(1)
+                    except NoSuchElementException:
+                        self.error("Failed to get video thumbnail image URL")
             try:
                 if legacyStyle:
                     downloadButton = self.getElement('.iconify_down_b')
@@ -790,28 +822,36 @@ class VimeoCrawler(object):
                 except NoSuchElementException:
                     self.error("Failed to access settings")
         # Saving video details
-        self.logger.debug("Saving video details")
-        try:
-            with codecsOpen(targetDetailsFileName, 'w', 'UTF-8') as f:
-                f.write(detailsText)
-        except IOError, e:
-            self.logger.warning("Error saving details text: %s", e)
-        # Saving video thumbnail
-        if videoThumbnailLink:
-            self.logger.debug("Getting thumbnail image")
+        if self.saveDetails:
+            self.logger.debug("Saving video details")
+            try:
+                with codecsOpen(targetDetailsFileName, 'w', 'UTF-8') as f:
+                    f.write(detailsText)
+            except IOError, e:
+                self.logger.warning("Error saving details text: %s", e)
+        # Saving video thumbnail image
+        if self.saveThumbnails and videoThumbnailLink:
+            self.logger.debug("Getting video thumbnail image...")
             try:
                 grabber = URLGrabber(reget = 'simple', timeout = self.timeout, user_agent = userAgent,
                                      http_headers = tuple((str(cookie['name']), str(cookie['value'])) for cookie in cookies))
                 grabber.urlgrab(videoThumbnailLink, filename = targetThumbnailFileName)
+                try:
+                    if imageOpen and imageOpen(targetThumbnailFileName).format != 'JPEG':
+                        self.error("Video thumbnail image is not JPEG")
+                    else:
+                        self.logger.debug("OK")
+                except IOError, e:
+                    self.logger.warning("Video thumbnail image verification failed: %s", e)
             except URLGrabError, e:
                 if e.errno == 14 and e.code == 22:
                     httpError = HTTP_ERROR_PATTERN.match(e.strerror).group(1)
                     if not self.getFileSizes and ' 416 ' in httpError:
                         pass # ok
                     else:
-                        self.logger.warning("Video thumbnail download failed: %s", httpError)
+                        self.logger.warning("Video thumbnail image download failed: %s", httpError)
                 else:
-                    self.logger.warning("Video thumbnail download failed: %s", e.strerror if e.errno == 14 else e)
+                    self.logger.warning("Video thumbnail image download failed: %s", e.strerror if e.errno == 14 else e)
         if not download:
             self.logger.warning("Download function not available")
         elif not link:
@@ -826,7 +866,7 @@ class VimeoCrawler(object):
                     self.error("Local file is larger (%d) than remote file (%d)", localSize, linkSize)
                     downloadSkip = True
             if downloadOK or downloadSkip:
-                if self.verifyExisting and not self.verifyFile(targetVideoFileName):
+                if self.verifyExisting and not self.verifyVideoFile(targetVideoFileName):
                     downloadOK = False
             elif self.doDownload:
                 timeout = self.timeout
@@ -846,7 +886,7 @@ class VimeoCrawler(object):
                         self.lastData = time()
                         self.count = 0
                         self.action = len(self.ACTION) - 1
-                        self.progress("Dowloading: ")
+                        self.progress("Downloading: ")
 
                     def update(self, totalRead, suffix = ''):
                         if totalRead == 0:
@@ -903,40 +943,34 @@ class VimeoCrawler(object):
                             self.updateCompleted = False
                             self.error("Downloaded file smaller (%d) than remote file (%d)", localSize, linkSize)
                             downloadOK = False
-                        elif self.verifyContent and not self.verifyFile(targetVideoFileName):
+                        elif self.verifyContent and not self.verifyVideoFile(targetVideoFileName):
                             self.updateCompleted = False
                             downloadOK = False
             if downloadOK:
-                self.logger.debug("OK")
+                self.logger.debug("Video OK")
             elif downloadSkip or not self.doDownload:
                 self.logger.debug("Download SKIPPED")
         # Creating symbolic links, if enabled
         for dirName in (dirName for (dirName, vIDs) in self.folders if vID in vIDs):
-            linkFileName = join(dirName, videoFileName) # unicode
-            try:
-                if lexists(linkFileName):
-                    remove(linkFileName)
-            except:
-                pass
-            try:
-                (hardlink if self.useHardLinks else symlink)(join('..', videoFileName), linkFileName)
-            except Exception, e:
-                self.error("Can't create link at %s: %s", encodeForConsole(linkFileName), e)
+            self.createLink(dirName, videoFileName) # unicode
+            self.createLink(dirName, thumbnailFileName) # unicode
+            self.createLink(dirName, detailsFileName) # unicode
 
     def checkForObsoletes(self):
         self.logger.info("Checking for obsolete files...")
         files = {}
         folders = set(basename(dirName) for (dirName, _vIDs) in self.folders)
         for fileName in listdir(unicode(self.targetDirectory)):
-            fullName = join(self.targetDirectory, fileName)
-            if '.' in fileName and isfile(fullName):
-                try:
-                    vID = int(fileName[fileName.rfind(' ') + 1 : fileName.rfind('.')])
-                    files[vID] = files.get(vID, []) + [(fileName, fullName),]
-                except ValueError:
-                    pass
-            elif self.detectObsolete and isdir(fullName) and not fileName in folders:
-                self.logger.warning("Unknown folder detected: %s", encodeForConsole(fileName))
+            if not fileName.endswith('.jpg') and not fileName.endswith('.html'):
+                fullName = join(self.targetDirectory, fileName)
+                if '.' in fileName and isfile(fullName):
+                    try:
+                        vID = int(fileName[fileName.rfind(' ') + 1 : fileName.rfind('.')])
+                        files[vID] = files.get(vID, []) + [(fileName, fullName),]
+                    except ValueError:
+                        pass
+                elif self.detectObsolete and isdir(fullName) and not fileName in folders:
+                    self.logger.warning("Unknown folder detected: %s", encodeForConsole(fileName))
         for (vID, fileNames) in files.iteritems():
             assert fileNames
             if self.detectObsolete and vID not in self.vIDs:
