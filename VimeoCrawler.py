@@ -96,7 +96,7 @@ except ImportError:
 
 isWindows = platform.lower().startswith('win')
 
-TITLE = 'VimeoCrawler v2.1 (c) 2013-2016 Vasily Zakharov vmzakhar@gmail.com'
+TITLE = 'VimeoCrawler v2.11 (c) 2013-2016 Vasily Zakharov vmzakhar@gmail.com'
 
 OPTION_NAMES = ('directory', 'login', 'max-items', 'retries', 'pause', 'set-language', 'embed-preset', 'timeout', 'webdriver')
 FIELD_NAMES = ('targetDirectory', 'credentials', 'maxItems', 'retryCount', 'pause', 'setLanguage', 'setPreset', 'timeout', 'driverName')
@@ -703,9 +703,9 @@ class VimeoCrawler(object):
                 if linkTitle:
                     link = linkTitle if legacyStyle else linkTitle.find_element_by_xpath('./following-sibling::td/a[.="Download"]')
                     break
+        userAgent = str(self.driver.execute_script('return window.navigator.userAgent'))
+        cookies = self.driver.get_cookies()
         if link: # Parse chosen download link
-            userAgent = str(self.driver.execute_script('return window.navigator.userAgent'))
-            cookies = self.driver.get_cookies()
             extension = link.get_attribute('download').split('.')[-1] # unicode
             description = encodeForConsole('%s/%s' % (linkTitle.text, extension.upper()))
             link = str(link.get_attribute('href'))
