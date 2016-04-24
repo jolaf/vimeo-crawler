@@ -96,7 +96,7 @@ except ImportError:
 
 isWindows = platform.lower().startswith('win')
 
-TITLE = 'VimeoCrawler v2.11 (c) 2013-2016 Vasily Zakharov vmzakhar@gmail.com'
+TITLE = 'VimeoCrawler v2.12 (c) 2013-2016 Vasily Zakharov vmzakhar@gmail.com'
 
 OPTION_NAMES = ('directory', 'login', 'max-items', 'retries', 'pause', 'set-language', 'embed-preset', 'timeout', 'webdriver')
 FIELD_NAMES = ('targetDirectory', 'credentials', 'maxItems', 'retryCount', 'pause', 'setLanguage', 'setPreset', 'timeout', 'driverName')
@@ -636,11 +636,11 @@ class VimeoCrawler(object):
         try:
             self.goTo(vID)
             try:
-                titleElement = self.getElement('#page_header .video_meta h1') # Legacy style video page
-                legacyStyle = True
-            except NoSuchElementException, e:
                 titleElement = self.getElement('h1.clip_info-header span:not([title])') # New style video page
                 legacyStyle = False
+            except NoSuchElementException, e:
+                titleElement = self.getElement('#page_header .video_meta h1') # Legacy style video page
+                legacyStyle = True
             title = encodeForConsole(titleElement.text.strip().rstrip('.'))
             try: # Check if video is private
                 isPrivate = self.getElement('.private' if legacyStyle else 'h1.clip_info-header span[title="Password Protected"]')
@@ -667,10 +667,10 @@ class VimeoCrawler(object):
                         detailsBlock = self.getElement('.iris_desc-content')
                         detailsText = detailsBlock.get_attribute('innerHTML')
                     except NoSuchElementException:
-                        self.error("Failed to get video description")
+                        self.logger.debug("Failed to get video description")
                 if self.saveThumbnails:
                     try:
-                        videoWrapper = self.getElement('.video-wrapper .video')
+                        videoWrapper = self.getElement('.video-wrapper .video', True)
                         videoWrapperBackground = videoWrapper.value_of_css_property('background-image')
                         videoThumbnailLink = BG_IMAGE_PATTERN.match(videoWrapperBackground).group(1)
                     except NoSuchElementException:
