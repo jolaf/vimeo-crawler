@@ -12,6 +12,7 @@ from tempfile import mkstemp
 from time import sleep, time
 from traceback import format_exc
 
+# ToDo: Add option for albums subdirectory, for it can be excluded from Mail.Ru sync
 # ToDo: Unify urlgrabber operations
 # ToDo: Download HD mp4 video version also
 # ToDo: Add option for that
@@ -96,7 +97,7 @@ except ImportError:
 
 isWindows = platform.lower().startswith('win')
 
-TITLE = 'VimeoCrawler v2.12 (c) 2013-2016 Vasily Zakharov vmzakhar@gmail.com'
+TITLE = 'VimeoCrawler v2.13 (c) 2013-2016 Vasily Zakharov vmzakhar@gmail.com'
 
 OPTION_NAMES = ('directory', 'login', 'max-items', 'retries', 'pause', 'set-language', 'embed-preset', 'timeout', 'webdriver')
 FIELD_NAMES = ('targetDirectory', 'credentials', 'maxItems', 'retryCount', 'pause', 'setLanguage', 'setPreset', 'timeout', 'driverName')
@@ -429,6 +430,13 @@ class VimeoCrawler(object):
         except Exception, e:
             usage("ERROR: %s" % e)
 
+    def dumpPage(self):
+        (f, dumpFileName) = mkstemp('.html', 'Error_', self.targetDirectory)
+        close(f)
+        with codecsOpen(dumpFileName, 'w', 'UTF-8') as f:
+            f.write(self.getElement('//*').get_attribute('outerHTML'))
+        self.logger.info("Page dumped as %s", dumpFileName)
+
     def setOperation(self, operation):
         self.operationFilter.operation = operation
 
@@ -466,7 +474,8 @@ class VimeoCrawler(object):
                             self.logger.info("Hit reCAPTCHA, user input required")
                             first = False
             except NoSuchElementException:
-                self.logger.error("Unindentified page, retrying")
+                self.error("Unindentified page, retrying")
+                self.dumpPage()
                 self.driver.get(url.url)
 
     def getElement(self, selector, wait = False, multiple = False):
@@ -509,6 +518,7 @@ class VimeoCrawler(object):
             self.userName = userName
         except NoSuchElementException, e:
             self.error("Login failed: %s", e)
+            self.dumpPage()
 
     def getItemsFromPage(self):
         self.logger.debug("Processing %s", self.driver.current_url)
@@ -519,6 +529,7 @@ class VimeoCrawler(object):
             items = tuple(URL(link) for link in links if VIMEO in link and not link.endswith('settings'))[:self.maxItems]
         except NoSuchElementException, e:
             self.error(e.msg)
+            self.dumpPage()
             items = ()
         numVideos = len(tuple(item for item in items if item.isVideo))
         if numVideos:
@@ -543,7 +554,10 @@ class VimeoCrawler(object):
             except NoSuchElementException:
                 break
         items = tuple(items)
-        assert len(items) == len(set(items))
+        s = set()
+        for item in items:
+            assert item not in s, "Duplicate item detected: %s" % item
+            s.add(item)
         if numPages > 1:
             self.logger.debug("Got total of %d items", len(items))
         return items
@@ -587,7 +601,8 @@ class VimeoCrawler(object):
                         try:
                             title = self.getElement('#group_header h1 a').text # backup
                         except NoSuchElementException, e:
-                            self.logger.error(e.msg)
+                            self.error(e.msg)
+                            self.dumpPage()
             if title:
                 self.logger.info("Processing folder %s", encodeForConsole(title))
                 self.setOperation(encodeForConsole(title))
@@ -651,6 +666,7 @@ class VimeoCrawler(object):
                 author = None if author == self.userName else encodeForConsole(author)
             except NoSuchElementException:
                 self.error("Failed to identify author")
+                self.dumpPage()
                 author = None
             detailsText = ''
             videoThumbnailLink = None
@@ -675,6 +691,7 @@ class VimeoCrawler(object):
                         videoThumbnailLink = BG_IMAGE_PATTERN.match(videoWrapperBackground).group(1)
                     except NoSuchElementException:
                         self.error("Failed to get video thumbnail image URL")
+                        self.dumpPage()
             try:
                 if legacyStyle:
                     downloadButton = self.getElement('.iconify_down_b')
@@ -687,6 +704,7 @@ class VimeoCrawler(object):
                 pass
         except NoSuchElementException, e:
             self.error(e.msg)
+            self.dumpPage()
             return
         # Parse download links
         link = linkTitle = linkSize = localSize = downloadOK = downloadSkip = None
@@ -756,11 +774,13 @@ class VimeoCrawler(object):
                                     submitButton.click()
                                 else:
                                     self.error("Unsupported language: %s", self.setLanguage)
+                                    self.dumpPage()
                                     self.setLanguage = None
                             else:
                                 self.logger.debug("Language is already set to %s / %s", currentLanguage.get_attribute('value').upper(), currentLanguage.text)
                         except NoSuchElementException:
                             self.error("Failed to set language to %s", self.setLanguage)
+                            self.dumpPage()
                     if self.setHD:
                         try:
                             videoFileTab = self.getElement('#tabs a[title="Video File"]')
@@ -781,6 +801,7 @@ class VimeoCrawler(object):
                                 self.error("Failed to set video to 1080p")
                         except NoSuchElementException:
                             self.error("Failed to access Video File settings")
+                            self.dumpPage()
                     if self.setPreset or self.setHD:
                         try:
                             embedTab = self.getElement('#tabs a[title=Embed]')
@@ -814,13 +835,17 @@ class VimeoCrawler(object):
                                             saveEmbedSettingsButton.click()
                                         else:
                                             self.error("Unknown preset: %s", self.setPreset)
+                                            self.dumpPage()
                                             self.setPreset = None
                                 except NoSuchElementException:
                                     self.error("Failed to set preset to %s", self.setPreset)
+                                    self.dumpPage()
                         except NoSuchElementException:
                             self.error("Failed to access Embed settings")
+                            self.dumpPage()
                 except NoSuchElementException:
                     self.error("Failed to access settings")
+                    self.dumpPage()
         # Saving video details
         if self.saveDetails:
             self.logger.debug("Saving video details")
@@ -839,6 +864,7 @@ class VimeoCrawler(object):
                 try:
                     if imageOpen and imageOpen(targetThumbnailFileName).format != 'JPEG':
                         self.error("Video thumbnail image is not JPEG")
+                        self.dumpPage()
                     else:
                         self.logger.debug("OK")
                 except IOError, e:
@@ -856,16 +882,17 @@ class VimeoCrawler(object):
             self.logger.warning("Download function not available")
         elif not link:
             self.error("Failed to obtain download link")
+            self.dumpPage()
         else: # Downloading file
-            if linkSize:
-                localSize = getFileSize(targetVideoFileName)
+            localSize = getFileSize(targetVideoFileName)
+            if localSize and linkSize:
                 if localSize == linkSize:
                     downloadOK = True
                 elif localSize > linkSize:
                     self.updateCompleted = False
                     self.error("Local file is larger (%d) than remote file (%d)", localSize, linkSize)
                     downloadSkip = True
-            if downloadOK or downloadSkip:
+            if downloadOK or downloadSkip or localSize and not linkSize:
                 if self.verifyExisting and not self.verifyVideoFile(targetVideoFileName):
                     downloadOK = False
             elif self.doDownload:
