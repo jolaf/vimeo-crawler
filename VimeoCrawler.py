@@ -97,12 +97,12 @@ except ImportError:
 
 isWindows = platform.lower().startswith('win')
 
-TITLE = 'VimeoCrawler v2.13 (c) 2013-2016 Vasily Zakharov vmzakhar@gmail.com'
+TITLE = 'VimeoCrawler v2.14 (c) 2013-2016 Vasily Zakharov vmzakhar@gmail.com'
 
-OPTION_NAMES = ('directory', 'login', 'max-items', 'retries', 'pause', 'set-language', 'embed-preset', 'timeout', 'webdriver')
-FIELD_NAMES = ('targetDirectory', 'credentials', 'maxItems', 'retryCount', 'pause', 'setLanguage', 'setPreset', 'timeout', 'driverName')
-SHORT_OPTIONS = ''.join(('%c:' % option[0]) for option in OPTION_NAMES) + 'hvunfzcxo'
-LONG_OPTIONS = tuple(('%s=' % option) for option in OPTION_NAMES) + ('help', 'verbose', 'update', 'no-download', 'no-folders', 'no-filesize', 'verify-content', 'verify-existing', 'detect-obsolete', 'hard-links', 'thumbnails', 'details', 'hd')
+OPTION_NAMES = ('directory', 'folders', 'login', 'max-items', 'retries', 'pause', 'set-language', 'embed-preset', 'timeout', 'webdriver')
+FIELD_NAMES = ('targetDirectory', 'foldersSubdirectory', 'credentials', 'maxItems', 'retryCount', 'pause', 'setLanguage', 'setPreset', 'timeout', 'driverName')
+SHORT_OPTIONS = ''.join(('%c:' % option[0]) for option in OPTION_NAMES) + 'hvunzcxo'
+LONG_OPTIONS = tuple(('%s=' % option) for option in OPTION_NAMES) + ('help', 'verbose', 'update', 'no-download', 'no-filesize', 'verify-content', 'verify-existing', 'detect-obsolete', 'hard-links', 'thumbnails', 'details')
 OPTION_PATTERNS = tuple(reCompile(pattern) for pattern in (r'-([^-\s])', r'--(\S+)'))
 
 USAGE_INFO = '''Usage: python VimeoCrawler.py [options] [startURL|videoID videoID ...]
@@ -122,7 +122,7 @@ Options:
 -v --verbose - Provide verbose logging.
 -n --no-download - Crawl only, do not download anything.
 -u --update - Process only newer videos that were not fully processed before.
--f --no-folders - Do not create subfolders with links for channels and albums.
+-f --folders - Path to create subfolders with links for channels and albums, defaults to not create links.
 -z --no-filesize - Do not get file sizes for videos (speeds up crawling a bit).
    --hard-links - Use hard links instead of symbolic links in subfolders.
    --thumbnails - Save video thumbnail images.
@@ -257,12 +257,10 @@ class VimeoCrawler(object):
         self.verbose = False
         self.updateOnly = False
         self.doDownload = True
-        self.foldersNeeded = True
         self.getFileSizes = bool(requests)
         self.useHardLinks = False
         self.saveThumbnails= False
         self.saveDetails = False
-        self.setHD = False
         self.verifyContent = False
         self.verifyExisting = False
         self.detectObsolete = False
@@ -273,6 +271,7 @@ class VimeoCrawler(object):
         # Options with parameters
         self.credentials = None
         self.targetDirectory = '.'
+        self.foldersSubdirectory = None
         self.timeout = 3
         self.retryCount = 3
         self.pause = None
@@ -295,8 +294,6 @@ class VimeoCrawler(object):
                     self.updateOnly = True
                 elif option in ('-n', '--no-download'):
                     self.doDownload = False
-                elif option in ('-f', '--no-folders'):
-                    self.foldersNeeded = False
                 elif option in ('-z', '--no-filesize'):
                     self.getFileSizes = False
                 elif option in ('-c', '--verify-content'):
@@ -311,8 +308,6 @@ class VimeoCrawler(object):
                     self.saveThumbnails= True
                 elif option in ('--details',):
                     self.saveDetails = True
-                elif option in ('--hd',):
-                    self.setHD = True
                 else: # Parsing options with arguments
                     index = None
                     for (maskNum, pattern) in enumerate(OPTION_PATTERNS):
@@ -337,7 +332,7 @@ class VimeoCrawler(object):
                 except ValueError:
                     raise ValueError("-l / --login parameter must be formatted as follows: user.name@host.name:password")
             else:
-                self.setLanguage = self.setPreset = self.setHD = None
+                self.setLanguage = self.setPreset = None
             if self.maxItems:
                 try:
                     self.maxItems = int(self.maxItems)
@@ -445,7 +440,8 @@ class VimeoCrawler(object):
         self.logger.error(*args, **kwargs)
 
     def createDir(self, dirName = None):
-        dirName = join(self.targetDirectory, dirName) if dirName else self.targetDirectory
+        parent = join(self.targetDirectory, self.foldersSubdirectory) if self.foldersSubdirectory else self.targetDirectory
+        dirName = join(parent, dirName) if dirName else parent
         if dirName and not isdir(dirName):
             makedirs(dirName)
         return dirName
@@ -576,7 +572,6 @@ class VimeoCrawler(object):
         elif url.isAccount: # Account main page
             self.logger.info("Processing account %s...", url.account)
             items = tuple(url.url + suffix for suffix in ('/videos', '/channels', '/albums'))
-            self.doCreateFolders = self.foldersNeeded
         elif url.isVideos: # Videos
             self.goTo(url)
             self.logger.info("Processing videos...")
@@ -585,7 +580,6 @@ class VimeoCrawler(object):
             self.goTo(url)
             self.logger.info("Processing %s...", url.category)
             items = self.getItemsFromFolder()
-            self.doCreateFolders = self.foldersNeeded
         elif url.isFolder: # Folder
             title = None
             self.goTo(url)
@@ -606,7 +600,7 @@ class VimeoCrawler(object):
             if title:
                 self.logger.info("Processing folder %s", encodeForConsole(title))
                 self.setOperation(encodeForConsole(title))
-                if self.doCreateFolders:
+                if self.foldersSubdirectory:
                     dirName = self.createDir(cleanupFileName(title.strip().rstrip('.'))) # unicode
                     url.createFile(dirName)
                     if symlink:
@@ -747,7 +741,7 @@ class VimeoCrawler(object):
         (targetVideoFileName, targetThumbnailFileName, targetDetailsFileName) = (encodeForFileSystem(join(self.targetDirectory, fileName)) for fileName in (videoFileName, thumbnailFileName, detailsFileName))
         if not legacyStyle and download:
             download.send_keys(Keys.ESCAPE)
-        if self.setLanguage or self.setPreset or self.setHD:
+        if self.setLanguage or self.setPreset:
             if author:
                 self.logger.warning("Different video author, skipping settings")
             else: # Matching author or unindentified author
@@ -781,44 +775,10 @@ class VimeoCrawler(object):
                         except NoSuchElementException:
                             self.error("Failed to set language to %s", self.setLanguage)
                             self.dumpPage()
-                    if self.setHD:
-                        try:
-                            videoFileTab = self.getElement('#tabs a[title="Video File"]')
-                            videoFileTab.click()
-                            try:
-                                radio = self.getElement('#hd_profile_1080')
-                                if radio.is_selected():
-                                    self.logger.debug("Video already set to 1080p")
-                                elif not radio.is_enabled():
-                                    self.logger.debug("Video cannot be set to 1080p")
-                                else:
-                                    self.updateCompleted = False
-                                    self.logger.debug("Setting video to 1080p")
-                                    radio.click()
-                                    upgradeVideoButton = self.getElement('#upgrade_video')
-                                    upgradeVideoButton.click()
-                            except NoSuchElementException:
-                                self.error("Failed to set video to 1080p")
-                        except NoSuchElementException:
-                            self.error("Failed to access Video File settings")
-                            self.dumpPage()
-                    if self.setPreset or self.setHD:
+                    if self.setPreset:
                         try:
                             embedTab = self.getElement('#tabs a[title=Embed]')
                             embedTab.click()
-                            if self.setHD:
-                                try:
-                                    checkbox = self.getElement('input[name=allow_hd_embed]')
-                                    if checkbox.is_selected():
-                                        self.logger.debug("Embed already set to HD")
-                                    else:
-                                        self.updateCompleted = False
-                                        self.logger.debug("Setting embed to HD")
-                                        checkbox.click()
-                                        saveEmbedSettingsButton = self.getElement('#settings_form input[name=save_embed_settings]')
-                                        saveEmbedSettingsButton.click()
-                                except NoSuchElementException:
-                                    self.logger.debug("Embed HD setting is not available")
                             if self.setPreset:
                                 try:
                                     presets = self.getElements("select#preset option")
@@ -1010,7 +970,6 @@ class VimeoCrawler(object):
                 self.logger.warning("Duplicate vID file detected: %s", encodeForConsole(fileName))
 
     def run(self):
-        self.doCreateFolders = False
         self.loggedIn = False
         self.userName = None
         self.folders = []
