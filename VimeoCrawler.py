@@ -12,7 +12,6 @@ from tempfile import mkstemp
 from time import sleep, time
 from traceback import format_exc
 
-# ToDo: Add option for albums subdirectory, for it can be excluded from Mail.Ru sync
 # ToDo: Unify urlgrabber operations
 # ToDo: Download HD mp4 video version also
 # ToDo: Add option for that
@@ -97,7 +96,7 @@ except ImportError:
 
 isWindows = platform.lower().startswith('win')
 
-TITLE = 'VimeoCrawler v2.14 (c) 2013-2016 Vasily Zakharov vmzakhar@gmail.com'
+TITLE = 'VimeoCrawler v2.15 (c) 2013-2016 Vasily Zakharov vmzakhar@gmail.com'
 
 OPTION_NAMES = ('directory', 'folders', 'login', 'max-items', 'retries', 'pause', 'set-language', 'embed-preset', 'timeout', 'webdriver')
 FIELD_NAMES = ('targetDirectory', 'foldersSubdirectory', 'credentials', 'maxItems', 'retryCount', 'pause', 'setLanguage', 'setPreset', 'timeout', 'driverName')
@@ -236,8 +235,8 @@ class URL(object):
 
     def createFile(self, directory):
         if not self.isVideo:
-            with open(join(directory, self.FILE_NAME), 'w') as f:
-                f.write('[InternetShortcut]\nURL=%s\n' % self.url.split('/videos')[0])
+            with open(join(directory, self.FILE_NAME), 'wb') as f:
+                f.write('[InternetShortcut]\r\nURL=%s\r\n' % self.url.split('/videos')[0])
 
     def __str__(self):
         return self.url
